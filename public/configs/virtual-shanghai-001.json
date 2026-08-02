@@ -1,0 +1,34 @@
+{
+  "id": "virtual-shanghai-001",
+  "title": "江畔钟楼与街巷",
+  "subtitle": "以完整球面模式验证连续环视、缩放与热点交互。",
+  "source": "/images/virtual-shanghai-001.png",
+  "mode": "sphere360",
+  "view": {
+    "yaw": 0,
+    "pitch": -4,
+    "hfov": 88,
+    "minYaw": -180,
+    "maxYaw": 180,
+    "minPitch": -70,
+    "maxPitch": 70,
+    "minHfov": 45,
+    "maxHfov": 110
+  },
+  "hotspots": [
+    {
+      "id": "clock-tower",
+      "type": "info",
+      "text": "临江钟楼与交通节点",
+      "yaw": 0,
+      "pitch": 4
+    }
+  ],
+  "metadata": {
+    "sourceYear": "20世纪初",
+    "sourceLabel": "虚拟上海历史影像",
+    "aiColorized": true,
+    "aiExpanded": true,
+    "disclaimer": "影像包含 AI 上色与扩展区域，仅用于沉浸式历史场景展示。"
+  }
+}

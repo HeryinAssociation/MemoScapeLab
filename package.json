@@ -1,0 +1,50 @@
+{
+  "name": "adaptive-pannellum",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.6.5",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "unrs-resolver",
+      "workerd"
+    ]
+  },
+  "scripts": {
+    "dev": "vinext dev",
+    "build": "vinext build",
+    "start": "vinext start",
+    "test": "pnpm run build && node --import tsx --test tests/auth.test.ts tests/scene-validator.test.ts tests/editor-presets.test.ts tests/adaptive-renderer.test.ts tests/bundled-projects.test.ts tests/rendered-html.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern work --ignore-pattern public/vendor"
+  },
+  "dependencies": {
+    "next": "^16.2.11",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.46.0",
+    "@cloudflare/workerd-windows-64": "^1.20260515.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "react-server-dom-webpack": "19.2.6",
+    "tailwindcss": "4.2.1",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "^8.1.5",
+    "wrangler": "^4.113.0"
+  },
+  "type": "module"
+}

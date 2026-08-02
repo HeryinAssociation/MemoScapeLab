@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adaptive Pannellum · 2026-08-01"
+  short_description: "恢复 Adaptive Pannellum 开发上下文与修改日志"
+  default_prompt: "Use $2026-08-01 to restore the Adaptive Pannellum project context and continue development safely."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adaptive Pannellum 2026-08-02 日志"
+  short_description: "恢复并延续 Adaptive Pannellum 当前开发上下文"
+  default_prompt: "使用 $2026-08-02 恢复 Adaptive Pannellum 截至今日的修改上下文并继续开发。"

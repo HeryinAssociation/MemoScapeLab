@@ -1,0 +1,36 @@
+{
+  "id": "shanghai-editor-scene",
+  "title": "上海历史街景调参",
+  "subtitle": "为当前照片寻找最自然的视域与投影方式",
+  "source": "/images/laozao-shanghai-001.png",
+  "mode": "curvedPhoto",
+  "projection": {
+    "horizontalSpan": 227,
+    "verticalSpan": 84,
+    "horizontalCurvature": 1,
+    "verticalCurvature": 0.18,
+    "edgeCompression": 0.12,
+    "centerX": 0.5,
+    "centerY": 0.5,
+    "horizonY": 0.52,
+    "edgeMode": "feather",
+    "edgeFeather": 0.025
+  },
+  "view": {
+    "yaw": 0,
+    "pitch": 0,
+    "hfov": 88,
+    "minYaw": -74,
+    "maxYaw": 74,
+    "minPitch": -20,
+    "maxPitch": 24,
+    "minHfov": 53,
+    "maxHfov": 90
+  },
+  "metadata": {
+    "sourceYear": "年代待考",
+    "aiColorized": true,
+    "aiExpanded": true,
+    "disclaimer": "扩展区域由 AI 辅助生成，仅用于沉浸式历史场景展示。"
+  }
+}

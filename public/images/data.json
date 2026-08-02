@@ -1,0 +1,48 @@
+[
+  {
+    "id": 1,
+    "photo_id": 19327,
+    "building_id": 510,
+    "building_name_zh": "外白渡橋",
+    "building_name_en": "Garden Bridge",
+    "address": "GARDEN BRIDGE",
+    "functions": [
+      "Transportation features",
+      "Roadway",
+      "Bridge"
+    ],
+    "title_zh": "上海，外白渡桥（The Garden Bridge）。",
+    "date": "1880",
+    "note_zh": "布里斯托大学——中国历史照片参考号：yo-s19。",
+    "street_zh": null,
+    "image_url": "https://cdn.jsdelivr.net/gh/hui5/VirtualShanghai-photos@main/images/19327.jpeg",
+    "image_path": "images/vs_001_19327.jpg",
+    "source": "virtual_shanghai",
+    "building_url": "https://www.virtualshanghai.net/Data/Buildings?ID=510"
+  },
+  {
+    "id": 1,
+    "source_id": "65ef2ae8-5c20-428a-afce-3c3e93d91ac8",
+    "text": "1991年夏天的外滩，没有智能手机，没有网络，也没有打卡的人潮。",
+    "source": "Li Ly",
+    "tags": [
+      "90年代",
+      "外滩",
+      "黄浦区"
+    ],
+    "totalComments": 2,
+    "dateCreated": "2024-08-26T11:41:41.509236Z",
+    "contentType": "Item",
+    "image_url": "https://stlaoshanghaiprod.blob.core.windows.net/photos/521da5f3-a2d5-4931-bd38-020cbd563b6a.jpg",
+    "image_path": "images/lz_001_521da5f3-a2d5-4931-bd38-020cbd563b6a.jpg",
+    "fileName": "521da5f3-a2d5-4931-bd38-020cbd563b6a.jpg",
+    "mediaItems": [
+      {
+        "type": "photo",
+        "url": "https://stlaoshanghaiprod.blob.core.windows.net/photos/521da5f3-a2d5-4931-bd38-020cbd563b6a.jpg",
+        "fileName": "521da5f3-a2d5-4931-bd38-020cbd563b6a.jpg",
+        "previewUrl": ""
+      }
+    ]
+  }
+]

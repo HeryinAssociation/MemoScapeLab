@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pannellum 拖拽加载全景</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        #panorama {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* 拖拽遮罩 */
+        #drop-mask {
+            position: fixed;
+            inset: 0;
+            background: rgba(30, 100, 255, 0.2);
+            border: 6px dashed #fff;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 99999;
+            pointer-events: none;
+            backdrop-filter: blur(3px);
+        }
+        #drop-mask.show {
+            display: flex;
+        }
+        .drop-text {
+            color: #fff;
+            font-size: 32px;
+            font-weight: 700;
+            text-shadow: 0 2px 12px rgba(0,0,0,0.6);
+        }
+
+        /* 初始提示 */
+        #tip {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.6);
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 100;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="tip">将全景图片拖入窗口即可加载</div>
+    <div id="panorama"></div>
+    <div id="drop-mask">
+        <div class="drop-text">松开鼠标加载全景图</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+    <script>
+        let viewer = null;
+
+        // 初始化全景（默认示例图）
+        function initPanorama(imageUrl) {
+            // 先销毁旧实例
+            if (viewer) {
+                viewer.destroy();
+                viewer = null;
+            }
+            // 创建新实例
+            viewer = pannellum.viewer('panorama', {
+                type: 'equirectangular',
+                panorama: imageUrl,
+                autoLoad: true,
+                hfov: 100,
+                showControls: true,
+                compass: true,
+                mouseZoom: true,
+                doubleClickZoom: true
+            });
+        }
+
+        // 默认加载官方示例
+        initPanorama('https://pannellum.org/images/alma.jpg');
+
+        // ========== 拖拽逻辑（修复版） ==========
+        const dropMask = document.getElementById('drop-mask');
+        let dragCount = 0; // 计数器解决子元素拖拽闪烁问题
+
+        // 全局阻止默认行为
+        window.addEventListener('dragenter', e => {
+            e.preventDefault();
+            dragCount++;
+            dropMask.classList.add('show');
+        });
+
+        window.addEventListener('dragover', e => {
+            e.preventDefault();
+        });
+
+        window.addEventListener('dragleave', e => {
+            e.preventDefault();
+            dragCount--;
+            if (dragCount <= 0) {
+                dragCount = 0;
+                dropMask.classList.remove('show');
+            }
+        });
+
+        window.addEventListener('drop', e => {
+            e.preventDefault();
+            dragCount = 0;
+            dropMask.classList.remove('show');
+
+            const files = e.dataTransfer.files;
+            if (!files || files.length === 0) return;
+
+            const file = files[0];
+            // 仅处理图片
+            if (!file.type.match(/^image\//)) {
+                alert('请拖入图片文件（jpg / png / webp）');
+                return;
+            }
+
+            // 读取本地文件
+            const reader = new FileReader();
+            reader.onload = function (evt) {
+                const dataUrl = evt.target.result;
+                initPanorama(dataUrl);
+                document.getElementById('tip').style.display = 'none';
+            };
+            reader.onerror = function () {
+                alert('图片读取失败，请重试');
+            };
+            reader.readAsDataURL(file);
+        });
+    </script>
+</body>
+</html>

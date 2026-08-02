@@ -1,0 +1,19 @@
+# Copy to .dev.vars for local overrides. Never commit real production secrets.
+PASSWORD_PEPPER=replace-with-a-long-random-secret
+SUPERADMIN_USERNAME=superadmin
+SUPERADMIN_EMAIL=admin@adaptivepannellum.local
+SUPERADMIN_PASSWORD=replace-with-a-strong-unique-password
+
+# Transactional email: Tencent Cloud SES. Copy this file to .dev.vars and fill
+# secrets locally. The committed example must never contain real credentials.
+EMAIL_PROVIDER=tencent-ses
+TENCENTCLOUD_SECRET_ID=replace_with_a_new_secret_id
+TENCENTCLOUD_SECRET_KEY=replace_with_a_new_secret_key
+TENCENT_SES_REGION=ap-guangzhou
+TENCENT_SES_FROM=Adaptive Pannellum <verify@mail.metaconstr.net>
+TENCENT_SES_TEMPLATE_ID=replace_with_an_approved_template_id
+
+# Optional alternative provider.
+# EMAIL_PROVIDER=resend
+# RESEND_API_KEY=re_replace_with_your_api_key
+# EMAIL_FROM=Adaptive Pannellum <noreply@example.com>
