@@ -2,12 +2,21 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import {
+  IMAGE_GEN_SCHEMA_STATEMENTS,
+  SETTINGS_SCHEMA_STATEMENTS,
   CREATE_PROJECTS_OWNER_INDEX,
   CREATE_PROJECTS_TABLE,
   CREATE_PROJECTS_UPDATED_INDEX,
 } from "../db/schema";
 import type { ImmersiveScene, SceneMode } from "../src/core/projection-types";
 import { BUNDLED_PROJECTS } from "../src/projects/bundled-projects";
+import { assetToDataUrl, resolveImageGenProvider, runImageGen } from "./image-gen";
+import {
+  getImageGenSettingsView,
+  saveImageGenSettings,
+  type ImageGenSettingsInput,
+} from "./image-gen/settings";
+import { ImageGenError } from "./image-gen/types";
 import {
   ensureAuthDatabase,
   ensureSuperadmin,
@@ -20,12 +29,13 @@ import {
   type D1Database,
   type R2Bucket,
 } from "./auth";
+import type { ImageGenEnv } from "./image-gen";
 
 interface Fetcher {
   fetch(request: Request): Promise<Response>;
 }
 
-interface Env extends AuthEnv {
+interface Env extends AuthEnv, ImageGenEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   MEDIA: R2Bucket;
@@ -79,6 +89,8 @@ async function ensureDatabase(env: Env, url: URL) {
   await db.batch([
     db.prepare(CREATE_PROJECTS_TABLE),
     db.prepare(CREATE_PROJECTS_UPDATED_INDEX),
+    ...IMAGE_GEN_SCHEMA_STATEMENTS.map((sql) => db.prepare(sql)),
+    ...SETTINGS_SCHEMA_STATEMENTS.map((sql) => db.prepare(sql)),
   ]);
   const columns = await db.prepare("PRAGMA table_info(projects)").all<{ name: string }>();
   if (!columns.results.some((column) => column.name === "owner_user_id")) {
@@ -331,6 +343,234 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
   return json({ error: "接口不存在。" }, { status: 404 });
 }
 
+/** 图片生成设置：GET 返回掩码视图，PUT 保存（superadmin + CSRF）。 */
+async function handleImageGenSettingsApi(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  if (url.pathname !== "/api/settings/imagegen") {
+    return json({ error: "接口不存在。" }, { status: 404 });
+  }
+  const auth = await getAuth(request, env.DB);
+  if (!auth) return json({ error: "请先登录。" }, { status: 401 });
+  if (auth.user.must_change_password) {
+    return json({ error: "请先在用户设置中修改临时密码。" }, { status: 403 });
+  }
+  if (auth.user.role !== "superadmin") {
+    return json({ error: "没有管理员权限。" }, { status: 403 });
+  }
+
+  if (request.method === "GET") {
+    const view = await getImageGenSettingsView(env.DB, env);
+    return json(view);
+  }
+
+  if (request.method === "PUT") {
+    if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
+    const body = (await request.json().catch(() => null)) as ImageGenSettingsInput | null;
+    if (!body || typeof body !== "object") {
+      return json({ error: "请求内容无效。" }, { status: 400 });
+    }
+    try {
+      await saveImageGenSettings(env.DB, auth.user.id, body, env);
+    } catch (error) {
+      if (error instanceof ImageGenError) {
+        return json({ error: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+    return json({ saved: true });
+  }
+
+  return json({ error: "接口不存在。" }, { status: 404 });
+}
+
+interface ImageGenTaskRow {
+  id: string;
+  project_id: string;
+  owner_user_id: string | null;
+  provider: string;
+  model: string;
+  prompt: string;
+  reference_image_keys: string;
+  status: "pending" | "running" | "succeeded" | "failed";
+  result_keys: string;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+const DEFAULT_GEN_PROMPT =
+  "把这张历史照片自然地扩展为可 360 度沉浸浏览的全景图，保持原有建筑、人物与光线风格一致，向四周平滑补全环境细节。";
+
+// 僵尸任务回收阈值：超过该时长仍未结束的 running/pending 任务视为中断
+const STALE_TASK_MS = 10 * 60 * 1000;
+
+async function handleGenerateApi(
+  request: Request,
+  env: Env,
+  url: URL,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  // 提交生成任务：登录 + CSRF + 项目所有权，后台 waitUntil 执行
+  if (url.pathname === "/api/generate" && request.method === "POST") {
+    const auth = await getAuth(request, env.DB);
+    if (!auth) return json({ error: "请先登录。" }, { status: 401 });
+    if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
+    if (auth.user.must_change_password) return json({ error: "请先修改临时密码。" }, { status: 403 });
+    if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
+
+    const body = (await request.json().catch(() => null)) as {
+      projectId?: unknown;
+      prompt?: unknown;
+      size?: unknown;
+      quality?: unknown;
+      provider?: unknown;
+    } | null;
+    const projectId = typeof body?.projectId === "string" ? body.projectId : "";
+    if (!projectId) return json({ error: "缺少项目 ID。" }, { status: 400 });
+
+    const project = await env.DB
+      .prepare("SELECT * FROM projects WHERE id = ?")
+      .bind(projectId)
+      .first<ProjectRow>();
+    if (!project) return json({ error: "项目不存在。" }, { status: 404 });
+    if (project.owner_user_id !== auth.user.id && auth.user.role !== "superadmin") {
+      return json({ error: "无权操作该项目。" }, { status: 403 });
+    }
+    if (!project.original_image_url) {
+      return json({ error: "请先上传原图。" }, { status: 400 });
+    }
+
+    const prompt =
+      typeof body?.prompt === "string" && body.prompt.trim() ? body.prompt.trim() : DEFAULT_GEN_PROMPT;
+    const size = typeof body?.size === "string" && body.size ? body.size : undefined;
+    const quality =
+      body?.quality === "low" || body?.quality === "medium" || body?.quality === "high"
+        ? body.quality
+        : undefined;
+
+    // 提前解析厂商，未配置时立即报错而不是后台失败
+    const provider = await resolveImageGenProvider(env, body?.provider as string | undefined);
+    const taskId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await env.DB
+      .prepare(
+        `INSERT INTO image_gen_tasks (
+          id, project_id, owner_user_id, provider, model, prompt,
+          reference_image_keys, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .bind(
+        taskId,
+        projectId,
+        auth.user.id,
+        provider.adapter.name,
+        provider.config.model,
+        prompt,
+        JSON.stringify([project.original_image_url]),
+        now,
+      )
+      .run();
+
+    ctx.waitUntil(runImageGenTask(env, taskId));
+    return json({ taskId, status: "pending" }, { status: 202 });
+  }
+
+  // 查询任务状态（轮询）：登录 + 任务所有权
+  const match = url.pathname.match(/^\/api\/generate\/([^/]+)$/);
+  if (match && request.method === "GET") {
+    const auth = await getAuth(request, env.DB);
+    if (!auth) return json({ error: "请先登录。" }, { status: 401 });
+    const task = await env.DB
+      .prepare("SELECT * FROM image_gen_tasks WHERE id = ?")
+      .bind(match[1])
+      .first<ImageGenTaskRow>();
+    if (!task) return json({ error: "任务不存在。" }, { status: 404 });
+    if (task.owner_user_id !== auth.user.id && auth.user.role !== "superadmin") {
+      return json({ error: "无权查看该任务。" }, { status: 403 });
+    }
+    // 僵尸任务回收：后台执行中断（如 dev server 重启）会导致任务永远卡在 running/pending
+    if (task.status === "running" || task.status === "pending") {
+      const anchor = task.status === "running" ? task.started_at : task.created_at;
+      if (anchor && Date.now() - new Date(anchor).getTime() > STALE_TASK_MS) {
+        const staleError = "生成超时，任务已中断。";
+        await env.DB
+          .prepare(
+            "UPDATE image_gen_tasks SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+          )
+          .bind(staleError, new Date().toISOString(), task.id)
+          .run();
+        task.status = "failed";
+        task.error = staleError;
+      }
+    }
+    const resultKeys = JSON.parse(task.result_keys) as string[];
+    return json({
+      taskId: task.id,
+      status: task.status,
+      error: task.error,
+      provider: task.provider,
+      model: task.model,
+      images: resultKeys.map((key) => ({ key, url: `/api/assets/${encodeURIComponent(key)}` })),
+    });
+  }
+
+  return json({ error: "接口不存在。" }, { status: 404 });
+}
+
+/** 后台执行生成：调用厂商 → 落 R2 → 更新任务状态与项目的全景图。 */
+async function runImageGenTask(env: Env, taskId: string) {
+  const now = () => new Date().toISOString();
+  try {
+    const task = await env.DB
+      .prepare("SELECT * FROM image_gen_tasks WHERE id = ?")
+      .bind(taskId)
+      .first<ImageGenTaskRow>();
+    if (!task) return;
+    await env.DB
+      .prepare("UPDATE image_gen_tasks SET status = 'running', started_at = ? WHERE id = ?")
+      .bind(now(), taskId)
+      .run();
+
+    const provider = await resolveImageGenProvider(env);
+    // 参考图 = R2 资产转 Base64 data URL（厂商无法访问本地 localhost /api/assets 地址）
+    const referenceImages: string[] = [];
+    for (const path of JSON.parse(task.reference_image_keys) as string[]) {
+      referenceImages.push(await assetToDataUrl(env.MEDIA, path));
+    }
+    const result = await runImageGen({
+      adapter: provider.adapter,
+      config: provider.config,
+      request: {
+        prompt: task.prompt,
+        referenceImages,
+        watermark: false,
+      },
+      r2: env.MEDIA,
+      r2KeyPrefix: `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated`,
+    });
+    const resultKeys = result.images.map((image) => image.key);
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          "UPDATE image_gen_tasks SET status = 'succeeded', result_keys = ?, finished_at = ? WHERE id = ?",
+        )
+        .bind(JSON.stringify(resultKeys), now(), taskId),
+      env.DB
+        .prepare("UPDATE projects SET panorama_image_url = ?, updated_at = ? WHERE id = ?")
+        .bind(`/api/assets/${encodeURIComponent(resultKeys[0])}`, now(), task.project_id),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await env.DB
+      .prepare("UPDATE image_gen_tasks SET status = 'failed', error = ?, finished_at = ? WHERE id = ?")
+      .bind(message, now(), taskId);
+  }
+}
+
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
@@ -350,7 +590,7 @@ const worker = {
       const needsDatabase =
         url.pathname.startsWith("/api/") ||
         url.pathname === "/" ||
-        ["/login", "/reg", "/verify-email", "/proj", "/work", "/about", "/usr", "/usradmin"].some(
+["/login", "/reg", "/verify-email", "/proj", "/work", "/about", "/usr", "/usradmin", "/imagegen"].some(
           (path) => url.pathname === path || url.pathname.startsWith(`${path}/`),
         );
       if (needsDatabase) await ensureDatabase(env, url);
@@ -379,7 +619,7 @@ const worker = {
         }
       }
 
-      if (["/proj", "/work", "/about", "/usr", "/usradmin"].some(
+if (["/proj", "/work", "/about", "/usr", "/usradmin", "/imagegen"].some(
         (path) => url.pathname === path || url.pathname.startsWith(`${path}/`),
       )) {
         const auth = await getAuth(request, env.DB);
@@ -391,7 +631,10 @@ const worker = {
         if (!auth.user.email_verified && !isUserSettings) {
           return Response.redirect(new URL("/verify-email?pending=1", request.url), 302);
         }
-        if (url.pathname.startsWith("/usradmin") && auth.user.role !== "superadmin") {
+        if (
+          (url.pathname.startsWith("/usradmin") || url.pathname.startsWith("/imagegen")) &&
+          auth.user.role !== "superadmin"
+        ) {
           return Response.redirect(new URL("/proj", request.url), 302);
         }
       }
@@ -408,6 +651,12 @@ const worker = {
       }
       if (url.pathname === "/api/assets" || url.pathname.startsWith("/api/assets/")) {
         return await handleAssetsApi(request, env, url);
+      }
+      if (url.pathname === "/api/generate" || url.pathname.startsWith("/api/generate/")) {
+        return await handleGenerateApi(request, env, url, ctx);
+      }
+      if (url.pathname === "/api/settings/imagegen") {
+        return await handleImageGenSettingsApi(request, env, url);
       }
     } catch (error) {
       return json(

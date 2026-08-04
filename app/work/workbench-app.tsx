@@ -1,453 +1,387 @@
 "use client";
 
 import Link from "next/link";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  type ChangeEvent,
-} from "react";
-import { EditorApp, INITIAL_SCENE } from "../editor-app";
-import { ViewerApp } from "../viewer-app";
-import {
-  isAdaptiveProjection,
-  isPartialSphereProjection,
-  type ImmersiveScene,
-} from "@/src/core/projection-types";
-import { MODE_LABELS, type PanoramaProject } from "@/src/projects/types";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { authenticatedFetch } from "@/src/auth/client";
+import type { ImmersiveScene } from "@/src/core/projection-types";
+import { MODE_LABELS, type PanoramaProject } from "@/src/projects/types";
+import type { ImageGenProviderName } from "@/worker/image-gen/types";
+import { EditorApp, INITIAL_SCENE } from "../editor-app";
 
-interface WorkbenchDraft {
-  id?: string;
-  title: string;
-  captureTime: string;
-  location: string;
-  notes: string;
-  mode: ImmersiveScene["mode"];
-  originalImageUrl: string;
-  panoramaImageUrl: string;
-  scene: ImmersiveScene;
-  workflowStep: number;
-  publicationStatus: "draft" | "published";
-}
+type LoadState = "loading" | "ready" | "error";
+type GenStatus = "idle" | "running" | "succeeded" | "failed";
 
-const STEPS = [
-  { id: 1, title: "上传照片", short: "SOURCE" },
-  { id: 2, title: "生成全景", short: "GENERATE" },
-  { id: 3, title: "投影调参", short: "CALIBRATE" },
-  { id: 4, title: "发布", short: "PUBLISH" },
+const WORKFLOW_STEPS = [
+  { n: 1, label: "上传照片" },
+  { n: 2, label: "生成全景" },
+  { n: 3, label: "投影调参" },
+  { n: 4, label: "发布" },
 ] as const;
 
-function sceneCoverage(scene: ImmersiveScene) {
-  if (isPartialSphereProjection(scene.projection)) {
-    return `${scene.projection.haov}° × ${scene.projection.vaov}°`;
-  }
-  if (isAdaptiveProjection(scene.projection)) {
-    return `${scene.projection.horizontalSpan}° × ${scene.projection.verticalSpan}°`;
-  }
-  return "360° × 180°";
-}
-
-function cloneInitialScene(): ImmersiveScene {
-  return {
-    ...INITIAL_SCENE,
-    id: "new-project",
-    title: "未命名照片项目",
-    subtitle: "",
-    source: "",
-    projection: INITIAL_SCENE.projection
-      ? { ...INITIAL_SCENE.projection }
-      : undefined,
-    view: { ...INITIAL_SCENE.view },
-    metadata: { ...INITIAL_SCENE.metadata },
-  };
-}
-
-function emptyDraft(): WorkbenchDraft {
-  return {
-    title: "",
-    captureTime: "",
-    location: "",
-    notes: "",
-    mode: "curvedPhoto",
-    originalImageUrl: "",
-    panoramaImageUrl: "",
-    scene: cloneInitialScene(),
-    workflowStep: 1,
-    publicationStatus: "draft",
-  };
-}
-
-function draftFromProject(project: PanoramaProject): WorkbenchDraft {
-  return {
-    id: project.id,
-    title: project.title,
-    captureTime: project.captureTime,
-    location: project.location,
-    notes: project.notes,
-    mode: project.mode,
-    originalImageUrl: project.originalImageUrl,
-    panoramaImageUrl: project.panoramaImageUrl,
-    scene: project.scene,
-    workflowStep: project.workflowStep,
-    publicationStatus: project.publicationStatus,
-  };
-}
-
 export function WorkbenchApp({ projectId }: { projectId?: string }) {
-  const [draft, setDraft] = useState<WorkbenchDraft>(() => emptyDraft());
-  const [step, setStep] = useState(projectId ? 3 : 1);
-  const [loading, setLoading] = useState(Boolean(projectId));
-  const [saving, setSaving] = useState(false);
-  const [uploading, setUploading] = useState<"original" | "panorama" | null>(null);
-  const [notice, setNotice] = useState(projectId ? "正在载入项目" : "新项目尚未保存");
-  const [error, setError] = useState("");
-  const [viewerRevision, setViewerRevision] = useState(0);
-  const [publishDetailsOpen, setPublishDetailsOpen] = useState(false);
+  const [project, setProject] = useState<PanoramaProject | null>(null);
+  // 新建项目（无 id）时服务端即可渲染步骤 1；带 id 时才需要先加载数据库
+  const [loadState, setLoadState] = useState<LoadState>(projectId ? "loading" : "ready");
+  const [message, setMessage] = useState(
+    projectId ? "正在读取项目" : "新建项目：请先上传原图",
+  );
+  const [step, setStep] = useState(1);
+
+  const [title, setTitle] = useState("");
+  const [captureTime, setCaptureTime] = useState("");
+  const [location, setLocation] = useState("");
+  const [notes, setNotes] = useState("");
+
+  const [genStatus, setGenStatus] = useState<GenStatus>("idle");
+  const [genError, setGenError] = useState("");
+  const [genProvider, setGenProvider] = useState<ImageGenProviderName | "">("");
+  const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!projectId) return;
-    let cancelled = false;
-    fetch(`/api/projects/${encodeURIComponent(projectId)}`)
-      .then(async (response) => {
-        const payload = (await response.json()) as {
-          project?: PanoramaProject;
-          error?: string;
-        };
-        if (!response.ok || !payload.project) {
-          throw new Error(payload.error ?? "项目载入失败");
-        }
-        if (!cancelled) {
-          const next = draftFromProject(payload.project);
-          setDraft(next);
-          setStep(Math.max(1, Math.min(4, next.workflowStep || 3)));
-          setNotice("项目数据已从本地数据库载入");
-          setLoading(false);
-        }
-      })
-      .catch((caught: unknown) => {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : "项目载入失败");
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
+    const controller = new AbortController();
+    if (projectId) {
+      fetch(`/api/projects/${encodeURIComponent(projectId)}`, { signal: controller.signal })
+        .then(async (response) => {
+          const payload = (await response.json()) as { project?: PanoramaProject; error?: string };
+          if (!response.ok) throw new Error(payload.error ?? "项目读取失败");
+          const loaded = payload.project!;
+          setProject(loaded);
+          setTitle(loaded.title);
+          setCaptureTime(loaded.captureTime);
+          setLocation(loaded.location);
+          setNotes(loaded.notes);
+          setStep(Math.min(4, Math.max(1, loaded.workflowStep)));
+          setLoadState("ready");
+          setMessage("项目已载入");
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          setLoadState("error");
+          setMessage(error instanceof Error ? error.message : "项目读取失败");
+        });
+    } else {
+      setLoadState("ready");
+      setStep(1);
+      setMessage("新建项目：请先上传原图");
+    }
+    return () => controller.abort();
   }, [projectId]);
 
-  const imageSource = draft.panoramaImageUrl || draft.originalImageUrl;
-  const canCalibrate = Boolean(imageSource);
-
-  const projectPayload = useCallback(
-    (scene: ImmersiveScene = draft.scene, workflowStep: number = step) => ({
-      ...(draft.id ? { id: draft.id } : {}),
-      title: draft.title.trim() || scene.title || "未命名照片项目",
-      captureTime: draft.captureTime,
-      location: draft.location,
-      notes: draft.notes,
-      mode: scene.mode,
-      originalImageUrl: draft.originalImageUrl,
-      panoramaImageUrl: draft.panoramaImageUrl,
-      workflowStep,
-      publicationStatus: draft.publicationStatus,
-      scene: {
-        ...scene,
-        title: draft.title.trim() || scene.title || "未命名照片项目",
-        subtitle: draft.location,
-        source: scene.source || imageSource,
-        metadata: {
-          ...scene.metadata,
-          sourceYear: draft.captureTime,
-        },
-      },
-    }),
-    [draft, imageSource, step],
-  );
-
-  const persistProject = useCallback(
-    async (scene: ImmersiveScene = draft.scene, workflowStep: number = step) => {
-      setSaving(true);
-      setError("");
-      try {
-        const payload = projectPayload(scene, workflowStep);
-        const endpoint = draft.id
-          ? `/api/projects/${encodeURIComponent(draft.id)}`
-          : "/api/projects";
-        const response = await authenticatedFetch(endpoint, {
-          method: draft.id ? "PUT" : "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const result = (await response.json()) as {
-          project?: PanoramaProject;
-          error?: string;
-        };
-        if (!response.ok || !result.project) {
-          throw new Error(result.error ?? "保存失败");
-        }
-        setDraft(draftFromProject(result.project));
-        setNotice("已保存到本地项目数据库");
-        if (!draft.id) {
-          window.history.replaceState(
-            {},
-            "",
-            `/work?id=${encodeURIComponent(result.project.id)}`,
-          );
-        }
-        return result.project;
-      } catch (caught) {
-        const message = caught instanceof Error ? caught.message : "保存失败";
-        setError(message);
-        setNotice("保存未完成");
-        throw caught;
-      } finally {
-        setSaving(false);
-      }
+  useEffect(
+    () => () => {
+      if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     },
-    [draft, projectPayload, step],
+    [],
   );
 
-  const uploadFile = useCallback(async (file: File) => {
-    const form = new FormData();
-    form.set("file", file);
-    const response = await authenticatedFetch("/api/assets", { method: "POST", body: form });
-    const payload = (await response.json()) as { url?: string; error?: string };
-    if (!response.ok || !payload.url) {
-      throw new Error(payload.error ?? "图片上传失败");
-    }
-    return payload.url;
-  }, []);
+  /** 创建或更新项目行，返回最新项目。 */
+  const saveProject = async (options: {
+    originalImageUrl?: string;
+    scene?: ImmersiveScene;
+    workflowStep?: number;
+  }) => {
+    const scene = options.scene ?? project?.scene ?? INITIAL_SCENE;
+    const body = {
+      title: title || "未命名项目",
+      captureTime,
+      location,
+      notes,
+      mode: project?.mode ?? "curvedPhoto",
+      originalImageUrl: options.originalImageUrl ?? project?.originalImageUrl ?? "",
+      panoramaImageUrl: project?.panoramaImageUrl ?? "",
+      scene,
+      workflowStep: options.workflowStep ?? step,
+      publicationStatus: project?.publicationStatus ?? "draft",
+    };
+    const response = project
+      ? await authenticatedFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      : await authenticatedFetch("/api/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+    const payload = (await response.json()) as { project?: PanoramaProject; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "项目保存失败");
+    setProject(payload.project!);
+    return payload.project!;
+  };
 
-  const uploadSource = async (
-    kind: "original" | "panorama",
-    event: ChangeEvent<HTMLInputElement>,
-  ) => {
+  const uploadOriginal = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    setUploading(kind);
-    setError("");
     try {
-      const url = await uploadFile(file);
-      const title = draft.title || file.name.replace(/\.[^.]+$/, "");
-      setDraft((current) => {
-        const useAsScene = kind === "panorama" || !current.panoramaImageUrl;
-        const nextScene = useAsScene
-          ? { ...current.scene, title, source: url }
-          : current.scene;
-        return {
-          ...current,
-          title,
-          [kind === "original" ? "originalImageUrl" : "panoramaImageUrl"]: url,
-          scene: nextScene,
-        };
+      setMessage(`正在上传原图：${file.name}`);
+      const form = new FormData();
+      form.append("file", file);
+      const response = await authenticatedFetch("/api/assets", {
+        method: "POST",
+        body: form,
       });
-      setNotice(`${kind === "original" ? "历史原图" : "宽幅照片"}已存入本地素材库`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "图片上传失败");
-    } finally {
-      setUploading(null);
+      const payload = (await response.json()) as { url?: string; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "上传失败");
+      const url = payload.url!;
+      if (!title) setTitle(file.name.replace(/\.[^.]+$/, ""));
+      // 新项目的场景 source 指向上传原图
+      const scene: ImmersiveScene = project
+        ? project.scene
+        : { ...INITIAL_SCENE, source: url };
+      await saveProject({ originalImageUrl: url, scene, workflowStep: 1 });
+      setMessage("原图已保存，可以进入下一步");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "上传失败");
     }
   };
 
-  const uploadFromEditor = useCallback(
-    async (file: File) => {
-      setUploading("panorama");
+  const startGenerate = async () => {
+    if (!project) return;
+    setGenStatus("running");
+    setGenError("");
+    try {
+      const body: Record<string, unknown> = { projectId: project.id };
+      if (genProvider) body.provider = genProvider;
+      const response = await authenticatedFetch("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json()) as { taskId?: string; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "生成任务提交失败");
+      pollTask(payload.taskId!);
+    } catch (error) {
+      setGenStatus("failed");
+      setGenError(error instanceof Error ? error.message : "生成任务提交失败");
+    }
+  };
+
+  const stopPolling = () => {
+    if (pollTimerRef.current) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  const pollTask = (taskId: string) => {
+    stopPolling();
+    pollTimerRef.current = window.setInterval(async () => {
       try {
-        const url = await uploadFile(file);
-        setDraft((current) => ({ ...current, panoramaImageUrl: url }));
-        setNotice("调参照片已存入本地素材库");
-        return url;
-      } finally {
-        setUploading(null);
+        const response = await authenticatedFetch(`/api/generate/${encodeURIComponent(taskId)}`);
+        const payload = (await response.json()) as {
+          status?: string;
+          error?: string;
+          images?: Array<{ key: string; url: string }>;
+        };
+        if (!response.ok) throw new Error(payload.error ?? "任务查询失败");
+        if (payload.status === "succeeded") {
+          stopPolling();
+          setGenStatus("succeeded");
+          setMessage("全景生成完成");
+          const projectResponse = await authenticatedFetch(
+            `/api/projects/${encodeURIComponent(project?.id ?? "")}`,
+          );
+          const projectPayload = (await projectResponse.json()) as {
+            project?: PanoramaProject;
+            error?: string;
+          };
+          if (projectResponse.ok && projectPayload.project) {
+            setProject(projectPayload.project);
+          }
+        } else if (payload.status === "failed") {
+          stopPolling();
+          setGenStatus("failed");
+          setGenError(payload.error ?? "全景生成失败");
+          setMessage("全景生成失败");
+        }
+        // pending / running → 继续轮询
+      } catch (error) {
+        stopPolling();
+        setGenStatus("failed");
+        setGenError(error instanceof Error ? error.message : "任务查询失败");
+        setMessage("任务查询失败");
       }
-    },
-    [uploadFile],
-  );
+    }, 3000);
+  };
 
-  const handleSceneChange = useCallback((scene: ImmersiveScene) => {
-    setDraft((current) =>
-      current.scene === scene
-        ? current
-        : { ...current, scene, mode: scene.mode },
-    );
-  }, []);
-
-  const currentTitle = useMemo(
-    () => draft.title || (draft.id ? "照片项目" : "新建照片项目"),
-    [draft.id, draft.title],
-  );
-
-  const continueFromSource = async () => {
-    if (!imageSource || !draft.title.trim()) return;
+  const publishProject = async () => {
+    if (!project) return;
     try {
-      await persistProject(
-        { ...draft.scene, source: imageSource, title: draft.title },
-        2,
-      );
-      setStep(2);
-    } catch {
-      // The visible error state already explains the failure.
+      const body = {
+        title,
+        captureTime,
+        location,
+        notes,
+        mode: project.mode,
+        originalImageUrl: project.originalImageUrl,
+        panoramaImageUrl: project.panoramaImageUrl,
+        scene: project.scene,
+        workflowStep: 4,
+        publicationStatus: "published",
+      };
+      const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json()) as { project?: PanoramaProject; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "发布失败");
+      setProject(payload.project!);
+      setMessage("项目已发布");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "发布失败");
     }
   };
 
-  const enterCalibration = async () => {
-    if (!canCalibrate) return;
-    setStep(3);
-    try {
-      await persistProject({ ...draft.scene, source: imageSource }, 3);
-    } catch {
-      // Users can continue adjusting locally and retry saving.
-    }
+  const saveScene = async (scene: ImmersiveScene) => {
+    await saveProject({ scene, workflowStep: 3 });
+    setMessage("投影参数已保存到数据库");
   };
 
-  const openPublishPreview = async () => {
-    if (!draft.id) return;
-    try {
-      await persistProject(draft.scene, 3);
-      setViewerRevision((current) => current + 1);
-      setStep(4);
-    } catch {
-      // The preview only opens after the latest parameters are persisted.
-    }
-  };
-
-  if (loading) {
-    return (
-      <main className="workbench-page workbench-loading">
-        <span className="loading-orbit" />
-        <strong>正在打开项目工作台</strong>
-        <small>{projectId}</small>
-      </main>
-    );
-  }
-
-  if (error && projectId && !draft.id) {
-    return (
-      <main className="workbench-page workbench-loading">
-        <span className="error-orbit">!</span>
-        <strong>项目无法打开</strong>
-        <small>{error}</small>
-        <Link href="/proj">返回项目库</Link>
-      </main>
-    );
-  }
+  const cover = project?.panoramaImageUrl || project?.originalImageUrl;
 
   return (
     <main className="workbench-page">
       <header className="workbench-topbar">
         <div className="workbench-title">
-          <Link href="/proj">← 项目库</Link>
+          <Link href="/proj">← 返回项目库</Link>
           <span />
-          <div>
-            <small>{draft.id ? `ID ${draft.id}` : "NEW PROJECT"}</small>
-            <strong>{currentTitle}</strong>
-          </div>
+          <span>
+            <small>ADAPTIVE PANNELLUM / WORKBENCH</small>
+            <strong>{title || project?.title || "新建照片项目"}</strong>
+          </span>
         </div>
         <div className="workbench-save-state">
-          <span className={error ? "has-error" : ""}><i /> {error || notice}</span>
-          {draft.id && <b>{MODE_LABELS[draft.mode]}</b>}
-          {step === 3 && draft.id && (
-            <button className="workbench-preview-button" type="button" disabled={saving} onClick={() => void openPublishPreview()}>
-              发布预览 →
-            </button>
-          )}
-          {step === 4 && (
-            <button className="workbench-preview-button" type="button" onClick={() => setStep(3)}>
-              ← 返回调参
-            </button>
-          )}
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => void persistProject()}
-          >
-            {saving ? "正在保存…" : "保存项目"}
-          </button>
+          <span><i />{message}</span>
+          <b>{project ? project.id.slice(0, 8) : "DRAFT"}</b>
         </div>
       </header>
 
-      <nav className="workflow-steps" aria-label="项目制作流程">
-        {STEPS.map((item) => {
-          return (
-            <button
-              type="button"
-              key={item.id}
-              className={`${step === item.id ? "is-active" : ""} ${item.id < step ? "is-complete" : ""}`}
-              disabled={item.id === 3 && !canCalibrate}
-              onClick={() => item.id === 4 ? void openPublishPreview() : setStep(item.id)}
-            >
-              <span>{item.id < step ? "✓" : item.id}</span>
-              <div><small>{item.short}</small><strong>{item.title}</strong></div>
-              {item.id === 4 && <em>预览</em>}
-            </button>
-          );
-        })}
+      <nav className="workflow-steps" aria-label="工作流步骤">
+        {WORKFLOW_STEPS.map((item) => (
+          <button
+            type="button"
+            key={item.n}
+            className={[
+              step === item.n ? "is-active" : "",
+              step > item.n ? "is-complete" : "",
+            ].join(" ")}
+            disabled={loadState === "loading"}
+            onClick={() => setStep(item.n)}
+          >
+            <span>{step > item.n ? "✓" : String(item.n).padStart(2, "0")}</span>
+            <span>
+              <small>STEP {String(item.n).padStart(2, "0")}</small>
+              <strong>{item.label}</strong>
+            </span>
+            {step > item.n && <em>完成</em>}
+          </button>
+        ))}
       </nav>
 
-      <section className={`workflow-stage stage-${step}`}>
-        {step === 1 && (
+      <section className="workflow-stage">
+        {loadState === "loading" && (
+          <div className="workbench-loading">
+            <span className="loading-orbit" />
+            <strong>正在读取项目</strong>
+            <small>DATABASE SYNC</small>
+          </div>
+        )}
+
+        {loadState === "error" && (
+          <div className="workbench-loading">
+            <span className="error-orbit">!</span>
+            <strong>项目读取失败</strong>
+            <small>{message}</small>
+            <Link href="/proj">返回项目库</Link>
+          </div>
+        )}
+
+        {loadState === "ready" && step === 1 && (
           <div className="source-step">
             <div className="step-intro">
-              <span>STEP 01 / SOURCE</span>
-              <h1>建立照片档案</h1>
-              <p>原图与生成后的宽幅图会作为两个独立素材保存；如果已有宽幅照片，可直接上传并进入调参。</p>
+              <span>STEP 01 / 影像来源</span>
+              <h1>上传照片</h1>
+              <p>上传历史原图或宽幅照片，并填写影像元数据。保存后即可进入全景生成。</p>
             </div>
-
             <div className="source-layout">
               <div className="source-uploads">
-                <UploadPanel
-                  kind="original"
-                  title="历史原图"
-                  description="未经扩展的老照片、档案扫描图"
-                  imageUrl={draft.originalImageUrl}
-                  uploading={uploading === "original"}
-                  onChange={(event) => void uploadSource("original", event)}
-                />
-                <div className="upload-flow-arrow" aria-hidden="true">→</div>
-                <UploadPanel
-                  kind="panorama"
-                  title="宽幅 / 全景照片"
-                  description="已生成的 AIGC 全景或其他宽幅照片"
-                  imageUrl={draft.panoramaImageUrl}
-                  uploading={uploading === "panorama"}
-                  onChange={(event) => void uploadSource("panorama", event)}
-                />
+                <label className={`source-upload-card ${project?.originalImageUrl ? "has-image" : ""}`}>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={uploadOriginal}
+                  />
+                  {project?.originalImageUrl && (
+                    <span
+                      className="source-upload-preview"
+                      style={{ backgroundImage: `url("${project.originalImageUrl}")` }}
+                    />
+                  )}
+                  <span className="source-upload-icon">＋</span>
+                  <strong>{project?.originalImageUrl ? "重新上传原图" : "选择历史原图"}</strong>
+                  <small>支持 JPG / PNG / WebP，单张不超过 30 MB</small>
+                  <em>CLICK TO UPLOAD</em>
+                </label>
+                <span className="upload-flow-arrow">→</span>
+                <div className="source-upload-card has-image">
+                  {cover ? (
+                    <span className="source-upload-preview" style={{ backgroundImage: `url("${cover}")` }} />
+                  ) : (
+                    <>
+                      <span className="source-upload-icon">▦</span>
+                      <strong>待生成全景</strong>
+                      <small>保存原图后可进入生成步骤</small>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div className="metadata-card">
                 <div className="metadata-heading">
-                  <div><small>METADATA</small><h2>影像元数据</h2></div>
-                  <span>01—05</span>
+                  <span>
+                    <small>ARCHIVE NOTES</small>
+                    <h2>影像元数据</h2>
+                  </span>
+                  <span>#{project ? "SAVED" : "NEW"}</span>
                 </div>
                 <label>
-                  <span>项目标题 *</span>
-                  <input
-                    value={draft.title}
-                    placeholder="例如：1930 年代外滩江畔街景"
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        title: event.target.value,
-                        scene: { ...current.scene, title: event.target.value },
-                      }))
-                    }
-                  />
+                  <span>项目标题</span>
+                  <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="如：1991 年外滩" />
                 </label>
                 <div className="metadata-row">
-                  <label><span>拍摄时间</span><input value={draft.captureTime} placeholder="约 1930 年代" onChange={(event) => setDraft((current) => ({ ...current, captureTime: event.target.value }))} /></label>
-                  <label><span>地点</span><input value={draft.location} placeholder="上海 · 外滩" onChange={(event) => setDraft((current) => ({ ...current, location: event.target.value }))} /></label>
+                  <label>
+                    <span>拍摄时间</span>
+                    <input value={captureTime} onChange={(event) => setCaptureTime(event.target.value)} placeholder="如：1991 年" />
+                  </label>
+                  <label>
+                    <span>地点</span>
+                    <input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="如：上海外滩" />
+                  </label>
                 </div>
                 <label>
-                  <span>文字备注</span>
-                  <textarea value={draft.notes} placeholder="记录照片来源、画面内容、生成过程或考证信息……" onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} />
+                  <span>项目备注</span>
+                  <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} placeholder="来源、版权与修复说明" />
                 </label>
                 <div className="metadata-action-row">
-                  <small>{!imageSource ? "请至少上传一张照片" : !draft.title.trim() ? "请填写项目标题" : "资料已就绪"}</small>
-                  <button type="button" disabled={!imageSource || !draft.title.trim() || saving} onClick={() => void continueFromSource()}>
-                    保存并继续 <span>→</span>
+                  <small>{project?.originalImageUrl ? "原图已保存" : "尚未上传原图"}</small>
+                  <button
+                    type="button"
+                    disabled={!project?.originalImageUrl}
+                    onClick={async () => {
+                      try {
+                        await saveProject({ workflowStep: 2 });
+                        setStep(2);
+                        setMessage("可以开始生成全景");
+                      } catch (error) {
+                        setMessage(error instanceof Error ? error.message : "保存失败");
+                      }
+                    }}
+                  >
+                    保存并继续<span>→</span>
                   </button>
                 </div>
               </div>
@@ -455,112 +389,103 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
           </div>
         )}
 
-        {step === 2 && (
+        {loadState === "ready" && step === 2 && (
           <div className="reserved-step">
             <div className="reserved-visual">
-              <div className="reserved-image" style={draft.originalImageUrl ? { backgroundImage: `url("${draft.originalImageUrl}")` } : undefined} />
-              <span>AI</span>
-              <div className="reserved-image panorama" style={draft.panoramaImageUrl ? { backgroundImage: `url("${draft.panoramaImageUrl}")` } : undefined} />
+              <span
+                className="reserved-image"
+                style={project?.originalImageUrl ? { backgroundImage: `url("${project.originalImageUrl}")` } : undefined}
+              />
+              <span>→</span>
+              <span
+                className="reserved-image panorama"
+                style={project?.panoramaImageUrl ? { backgroundImage: `url("${project.panoramaImageUrl}")` } : undefined}
+              />
             </div>
-            <span className="eyebrow">STEP 02 / GENERATE</span>
-            <h1>全景生成模块已预留</h1>
-            <p>后续将接入用户自定义的大模型 API，把历史原图扩展为可调参的宽幅或全景照片。本轮可使用已上传的宽幅照片直接继续。</p>
+            <h1>生成全景</h1>
+            <p>
+              以已上传的历史原图为参考，调用大模型图生图接口扩出可 360 度浏览的全景图。
+              生成任务在服务端执行，完成后结果自动存入项目库。
+            </p>
+            <label style={{ display: "flex", alignItems: "center", gap: 12, margin: "16px 0", fontSize: 11 }}>
+              <span>图片生成厂商：</span>
+              <select
+                value={genProvider}
+                onChange={(event) => setGenProvider(event.target.value as ImageGenProviderName | "")}
+                style={{ padding: "6px 8px", border: "1px solid rgba(7,16,12,0.19)", borderRadius: 4, background: "transparent", color: "var(--admin-ink)", fontSize: 11 }}
+              >
+                <option value="">默认（系统设置）</option>
+                <option value="seedream">Seedream（火山方舟）</option>
+                <option value="openai">OpenAI</option>
+                <option value="qwen">Qwen（阿里云百炼）</option>
+              </select>
+            </label>
             <div className="reserved-actions">
-              <button type="button" disabled>开始 AI 生成 · 后续开放</button>
-              <button type="button" className="admin-primary-button" disabled={!canCalibrate} onClick={() => void enterCalibration()}>
-                使用当前照片进入调参 →
+              <button
+                className="admin-primary-button"
+                type="button"
+                disabled={!project?.originalImageUrl || genStatus === "running"}
+                onClick={startGenerate}
+              >
+                {genStatus === "running" ? "生成中…" : project?.panoramaImageUrl ? "重新生成全景" : "开始生成全景"}
               </button>
+              {project?.panoramaImageUrl && (
+                <button type="button" onClick={() => setStep(3)}>进入投影调参</button>
+              )}
             </div>
+            {genStatus === "running" && <p>任务已提交，正在等待生成结果（通常需要 10-60 秒）…</p>}
+            {genStatus === "failed" && <p style={{ color: "#b34c3c" }}>生成失败：{genError}</p>}
+            {genStatus === "succeeded" && <p>生成完成，全景图已保存。</p>}
           </div>
         )}
 
-        {step === 3 && (
+        {loadState === "ready" && step === 3 && project && (
           <div className="calibration-step">
             <EditorApp
-              key={draft.id ?? "new-project-editor"}
               embedded
-              originalImageUrl={draft.originalImageUrl}
-              originalImageTitle={draft.title || "历史照片原照"}
-              initialScene={{ ...draft.scene, source: draft.scene.source || imageSource }}
-              onSceneChange={handleSceneChange}
-              onSave={async (scene) => {
-                await persistProject(scene, 3);
-              }}
-              onImageUpload={uploadFromEditor}
+              initialScene={project.scene}
+              originalImageUrl={project.originalImageUrl}
+              originalImageTitle="历史照片原照"
+              onSave={saveScene}
             />
           </div>
         )}
 
-        {step === 4 && (
+        {loadState === "ready" && step === 4 && project && (
           <div className="publish-step">
-            <div className="publish-viewer-wrap">
-              {draft.id && (
-                <ViewerApp key={`${draft.id}-${viewerRevision}`} projectId={draft.id} embedded />
-              )}
+            <div
+              className="publish-preview"
+              style={cover ? { backgroundImage: `url("${cover}")` } : undefined}
+            >
+              <span>{project.publicationStatus === "published" ? "PUBLISHED" : "DRAFT"}</span>
+              <div>
+                <small>{project.captureTime || "年代待考"}</small>
+                <h1>{project.title}</h1>
+              </div>
             </div>
             <div className="publish-copy">
-              <span className="eyebrow">STEP 04 / PUBLISH</span>
-              <h2>发布流程已预留</h2>
-              <p>项目与技术参数已经可以完整保存。后续前端完成后，这里将提供发布状态、前端可见性与撤回管理。</p>
-              <dl className="publish-status-list">
-                <div><dt>项目状态</dt><dd>草稿</dd></div>
-                <div><dt>投影方式</dt><dd>{MODE_LABELS[draft.mode]}</dd></div>
-                <div><dt>参数记录</dt><dd>已写入项目数据库</dd></div>
+              <span className="eyebrow">PUBLISH</span>
+              <h2>发布项目</h2>
+              <p>发布后项目将以只读方式在成片浏览页展示，供访客沉浸浏览。</p>
+              <dl>
+                <div><dt>投影方式</dt><dd>{MODE_LABELS[project.mode]}</dd></div>
+                <div><dt>全景图</dt><dd>{project.panoramaImageUrl ? "已生成" : "未生成"}</dd></div>
+                <div><dt>状态</dt><dd>{project.publicationStatus === "published" ? "已发布" : "草稿"}</dd></div>
               </dl>
               <button
                 type="button"
-                className="publish-parameter-toggle"
-                aria-expanded={publishDetailsOpen}
-                onClick={() => setPublishDetailsOpen((open) => !open)}
+                disabled={project.publicationStatus === "published"}
+                onClick={publishProject}
               >
-                {publishDetailsOpen ? "收起参数" : "查看参数"}
-                <span>{publishDetailsOpen ? "−" : "+"}</span>
+                {project.publicationStatus === "published" ? "已发布" : "发布项目"}
               </button>
-              {publishDetailsOpen && (
-                <div className="publish-parameter-panel">
-                  <dl>
-                    <div><dt>投影方式</dt><dd>{MODE_LABELS[draft.scene.mode]}</dd></div>
-                    <div><dt>覆盖范围</dt><dd>{sceneCoverage(draft.scene)}</dd></div>
-                    <div><dt>默认视场</dt><dd>{draft.scene.view.hfov}°</dd></div>
-                    <div><dt>水平边界</dt><dd>{draft.scene.view.minYaw}° — {draft.scene.view.maxYaw}°</dd></div>
-                  </dl>
-                  <p>{draft.notes || draft.scene.metadata?.disclaimer || "暂无项目备注。"}</p>
-                </div>
-              )}
-              <button type="button" disabled>发布到前端 · 后续开放</button>
-              <button type="button" className="text-button" onClick={() => setStep(3)}>← 返回继续调参</button>
+              <Link className="text-button" href={`/viewer?id=${encodeURIComponent(project.id)}`}>
+                在成片浏览页打开 →
+              </Link>
             </div>
           </div>
         )}
       </section>
     </main>
-  );
-}
-
-function UploadPanel({
-  kind,
-  title,
-  description,
-  imageUrl,
-  uploading,
-  onChange,
-}: {
-  kind: "original" | "panorama";
-  title: string;
-  description: string;
-  imageUrl: string;
-  uploading: boolean;
-  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
-}) {
-  return (
-    <label className={`source-upload-card ${imageUrl ? "has-image" : ""}`}>
-      {imageUrl && <span className="source-upload-preview" style={{ backgroundImage: `url("${imageUrl}")` }} />}
-      <span className="source-upload-index">{kind === "original" ? "A" : "B"}</span>
-      <span className="source-upload-icon">{uploading ? "···" : imageUrl ? "↻" : "+"}</span>
-      <strong>{uploading ? "正在保存图片" : imageUrl ? `更换${title}` : `上传${title}`}</strong>
-      <small>{description}</small>
-      <em>JPG / PNG / WEBP · 最大 30 MB</em>
-      <input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={onChange} hidden />
-    </label>
   );
 }
