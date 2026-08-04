@@ -4,13 +4,13 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { authenticatedFetch, getCurrentAuth, setCurrentAuth, type CurrentUser } from "@/src/auth/client";
 
-type AdminSection = "projects" | "work" | "user" | "users";
+type AdminSection = "projects" | "work" | "about" | "user" | "users";
 
 const NAV_ITEMS = [
   { key: "home", label: "主页", symbol: "⌂", href: "", disabled: true },
   { key: "projects", label: "项目", symbol: "▦", href: "/proj", disabled: false },
   { key: "work", label: "工作台", symbol: "◎", href: "/work", disabled: false },
-  { key: "about", label: "关于", symbol: "i", href: "", disabled: true },
+  { key: "about", label: "关于", symbol: "i", href: "/about", disabled: false },
 ] as const;
 
 export function AdminShell({
@@ -57,8 +57,8 @@ export function AdminShell({
   return (
     <div className="admin-shell">
       <aside className="admin-appbar" aria-label="管理后台导航">
-        <Link className="admin-logo" href="/proj" aria-label="Adaptive Pannellum 项目">
-          AP
+        <Link className="admin-logo" href="/proj" aria-label="MemoscapeLab 项目">
+          ML
         </Link>
         <nav>
           {navItems.map((item) =>

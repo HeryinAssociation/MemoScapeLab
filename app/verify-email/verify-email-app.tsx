@@ -43,7 +43,7 @@ export function VerifyEmailApp() {
         }
         setEmail(auth.user.email);
         setState("form");
-        setMessage("请输入邮件中的 6 位验证码。验证码 30 分钟内有效。");
+        setMessage("验证码会在注册后自动发送；如暂未收到，可重新发送。验证码 30 分钟内有效。");
       } catch {
         window.location.assign("/login?next=%2Fverify-email%3Fpending%3D1");
       }
@@ -116,12 +116,12 @@ export function VerifyEmailApp() {
 
   return (
     <main className="auth-page auth-verify-page">
-      <section className="auth-visual" aria-hidden="true"><div className="auth-brand"><span>AP</span><div><strong>ADAPTIVE PANNELLUM</strong><small>EMAIL VERIFICATION</small></div></div></section>
+      <section className="auth-visual" aria-hidden="true"><div className="auth-brand"><span>ML</span><div><strong>MEMOSCAPELAB</strong><small>EMAIL VERIFICATION</small></div></div></section>
       <section className="auth-panel"><div className="auth-form-wrap verify-result">
         <span className={`verify-symbol is-${state}`}>{state === "loading" ? "··" : state === "success" ? "✓" : state === "error" ? "!" : "@"}</span>
         <span className="eyebrow">EMAIL VERIFICATION / 邮箱验证</span>
         <h2>{state === "success" ? "验证完成" : state === "error" ? "无法完成验证" : state === "form" ? "验证注册邮箱" : "正在验证"}</h2>
-        {email && <p>验证码已发送至 <strong>{email}</strong></p>}
+        {email && <p>注册邮箱：<strong>{email}</strong></p>}
         <p className={state === "form" && message.includes("失败") ? "form-message is-error" : ""}>{message}</p>
         {state === "form" && (
           <form className="auth-form verify-code-form" onSubmit={verifyCode}>

@@ -1,5 +1,5 @@
 import { AUTH_SCHEMA_STATEMENTS } from "../db/schema";
-import { sendTencentVerificationCode } from "./tencent-ses";
+import { sendTencentVerificationCodeWithRetry } from "./tencent-ses";
 
 export interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
@@ -198,7 +198,7 @@ export async function ensureSuperadmin(env: AuthEnv) {
   const password = env.SUPERADMIN_PASSWORD || "";
   if (!password) return null;
   const username = normalizeUsername(env.SUPERADMIN_USERNAME || "superadmin");
-  const email = normalizeEmail(env.SUPERADMIN_EMAIL || "admin@adaptivepannellum.local");
+  const email = normalizeEmail(env.SUPERADMIN_EMAIL || "admin@memoscapelab.local");
   const now = new Date().toISOString();
   const passwordHash = await hashPassword(password, env.PASSWORD_PEPPER);
   await env.DB.prepare(`
@@ -363,6 +363,13 @@ async function createEmailVerification(env: AuthEnv, request: Request, user: Use
     .bind(tokenHash, user.id, expires.toISOString(), now.toISOString())
     .run();
 
+  const discardUndeliveredCredential = () => env.DB.prepare(`
+    DELETE FROM email_verification_tokens
+    WHERE user_id = ? AND token_hash = ? AND consumed_at IS NULL
+  `)
+    .bind(user.id, tokenHash)
+    .run();
+
   if (useTencent) {
     const templateId = Number(env.TENCENT_SES_TEMPLATE_ID);
     if (
@@ -372,34 +379,38 @@ async function createEmailVerification(env: AuthEnv, request: Request, user: Use
       !Number.isSafeInteger(templateId) ||
       templateId <= 0
     ) {
+      await discardUndeliveredCredential();
       return { delivery: "not_configured" as const };
     }
-    try {
-      const result = await sendTencentVerificationCode(
-        {
-          secretId: env.TENCENTCLOUD_SECRET_ID,
-          secretKey: env.TENCENTCLOUD_SECRET_KEY,
-          region: env.TENCENT_SES_REGION || "ap-guangzhou",
-          from: env.TENCENT_SES_FROM,
-          templateId,
-        },
-        user.email,
-        credential,
-      );
-      return result.ok
-        ? { delivery: "sent" as const }
-        : { delivery: "failed" as const, providerErrorCode: result.errorCode };
-    } catch {
-      return { delivery: "failed" as const };
+    const result = await sendTencentVerificationCodeWithRetry(
+      {
+        secretId: env.TENCENTCLOUD_SECRET_ID,
+        secretKey: env.TENCENTCLOUD_SECRET_KEY,
+        region: env.TENCENT_SES_REGION || "ap-guangzhou",
+        from: env.TENCENT_SES_FROM,
+        templateId,
+      },
+      user.email,
+      credential,
+    );
+    if (!result.ok) {
+      await discardUndeliveredCredential();
+      return { delivery: "failed" as const, providerErrorCode: result.errorCode };
     }
+    return { delivery: "sent" as const };
   }
 
   if (!useResend) {
-    return isLocalRequest(new URL(request.url))
-      ? { delivery: "development" as const, devVerificationCode: credential }
-      : { delivery: "not_configured" as const };
+    if (isLocalRequest(new URL(request.url))) {
+      return { delivery: "development" as const, devVerificationCode: credential };
+    }
+    await discardUndeliveredCredential();
+    return { delivery: "not_configured" as const };
   }
-  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return { delivery: "not_configured" as const };
+  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) {
+    await discardUndeliveredCredential();
+    return { delivery: "not_configured" as const };
+  }
 
   const url = new URL("/verify-email", request.url);
   url.searchParams.set("token", credential);
@@ -413,11 +424,14 @@ async function createEmailVerification(env: AuthEnv, request: Request, user: Use
     body: JSON.stringify({
       from: env.EMAIL_FROM,
       to: [user.email],
-      subject: "验证您的 Adaptive Pannellum 注册邮箱",
+      subject: "验证您的 MemoscapeLab 注册邮箱",
       html: `<div style="font-family:Arial,sans-serif;color:#07100c"><h2>验证注册邮箱</h2><p>${escapeHtml(user.username)}，您好。请在 30 分钟内完成邮箱验证。</p><p><a href="${escapeHtml(url.toString())}" style="display:inline-block;padding:12px 18px;background:#173c2e;color:#f4f1e8;text-decoration:none">验证邮箱</a></p><p>如果不是您本人操作，请忽略此邮件。</p></div>`,
     }),
   });
-  if (!response.ok) return { delivery: "failed" as const };
+  if (!response.ok) {
+    await discardUndeliveredCredential();
+    return { delivery: "failed" as const };
+  }
   return { delivery: "sent" as const };
 }
 

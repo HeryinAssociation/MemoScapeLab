@@ -25,18 +25,18 @@ export async function generateMetadata(): Promise<Metadata> {
 
   return {
     metadataBase,
-    title: "Adaptive Pannellum｜影像项目管理工作台",
+    title: "MemoscapeLab｜影像项目管理工作台",
     description:
       "保存历史照片、全景素材、元数据与投影视角参数的本地项目管理工作台。",
     openGraph: {
-      title: "Adaptive Pannellum",
+      title: "MemoscapeLab",
       description: "历史影像项目管理与投影调参工作台",
       type: "website",
       images: [{ url: "/og-editor.png", width: 1732, height: 908 }],
     },
     twitter: {
       card: "summary_large_image",
-      title: "Adaptive Pannellum",
+      title: "MemoscapeLab",
       description: "历史影像项目管理与投影调参工作台",
       images: ["/og-editor.png"],
     },

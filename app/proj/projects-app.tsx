@@ -113,7 +113,7 @@ export function ProjectsApp() {
                   >
                     {!cover && <span>NO IMAGE</span>}
                     <div className="project-cover-topline">
-                      <small>AP—{String(index + 1).padStart(3, "0")}</small>
+                      <small>ML—{String(index + 1).padStart(3, "0")}</small>
                       <span>{MODE_LABELS[project.mode]}</span>
                     </div>
                     <div className="project-cover-footer">

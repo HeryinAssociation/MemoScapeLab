@@ -53,7 +53,7 @@ export function RegisterApp() {
   return (
     <main className="auth-page auth-register-page">
       <section className="auth-visual" aria-hidden="true">
-        <div className="auth-brand"><span>AP</span><div><strong>ADAPTIVE PANNELLUM</strong><small>历史影像沉浸式工作台</small></div></div>
+        <div className="auth-brand"><span>ML</span><div><strong>MEMOSCAPELAB</strong><small>历史影像沉浸式工作台</small></div></div>
         <div className="auth-visual-copy"><span>CREATE ARCHIVE / 02</span><h1>建立属于您的<br />影像档案库。</h1><p>每个账号拥有独立项目与素材空间。</p></div>
         <div className="auth-grid-note">PRIVATE PROJECT OWNERSHIP<br />D1 + R2 SECURE STORAGE</div>
       </section>

@@ -59,8 +59,8 @@ test("renders the project database as the primary admin application", async () =
 
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="zh-CN"/i);
-  assert.match(html, /<title>Adaptive Pannellum｜影像项目管理工作台<\/title>/i);
-  assert.match(html, /Adaptive Pannellum/);
+  assert.match(html, /<title>MemoscapeLab｜影像项目管理工作台<\/title>/i);
+  assert.match(html, /MemoscapeLab/);
   assert.match(html, /影像项目/);
   assert.match(html, /新建照片项目/);
   assert.match(html, /项目档案/);
@@ -80,6 +80,18 @@ test("renders the login and registration entry points", async () => {
   const registration = await render("/reg", false);
   assert.equal(registration.status, 200);
   assert.match(await registration.text(), /建立账号|用户注册/);
+});
+
+test("renders the MemoscapeLab about page and team credits", async () => {
+  const response = await render("/about");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /MemoscapeLab/);
+  assert.match(html, /记忆空间实验室/);
+  assert.match(html, /第十一届上海图书馆开放数据竞赛作品/);
+  assert.match(html, /付雅明、王凤羽/);
+  assert.match(html, /赵朔辰、曾泽川/);
+  assert.match(html, /2026年8月10日更新/);
 });
 
 test("ships the local Pannellum runtime and stylesheet", async () => {

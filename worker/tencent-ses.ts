@@ -82,7 +82,7 @@ export async function sendTencentVerificationCode(
   const body = JSON.stringify({
     FromEmailAddress: config.from,
     Destination: [destination],
-    Subject: "验证您的 Adaptive Pannellum 注册邮箱",
+    Subject: "验证您的 MemoscapeLab 注册邮箱",
     Template: {
       TemplateID: config.templateId,
       TemplateData: JSON.stringify({ code }),
@@ -123,4 +123,33 @@ export async function sendTencentVerificationCode(
     messageId: serviceResponse?.MessageId,
     requestId: serviceResponse?.RequestId,
   };
+}
+
+type TencentSesSender = (
+  config: TencentSesConfig,
+  destination: string,
+  code: string,
+) => Promise<TencentSesResult>;
+
+/** Retry one failed request without rotating the verification code. */
+export async function sendTencentVerificationCodeWithRetry(
+  config: TencentSesConfig,
+  destination: string,
+  code: string,
+  sender: TencentSesSender = sendTencentVerificationCode,
+  maxAttempts = 2,
+): Promise<TencentSesResult> {
+  let lastResult: TencentSesResult = { ok: false, errorCode: "NETWORK_ERROR" };
+  const attempts = Math.max(1, maxAttempts);
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      lastResult = await sender(config, destination, code);
+      if (lastResult.ok) return lastResult;
+    } catch {
+      lastResult = { ok: false, errorCode: "NETWORK_ERROR" };
+    }
+  }
+
+  return lastResult;
 }

@@ -350,7 +350,7 @@ const worker = {
       const needsDatabase =
         url.pathname.startsWith("/api/") ||
         url.pathname === "/" ||
-        ["/login", "/reg", "/verify-email", "/proj", "/work", "/usr", "/usradmin"].some(
+        ["/login", "/reg", "/verify-email", "/proj", "/work", "/about", "/usr", "/usradmin"].some(
           (path) => url.pathname === path || url.pathname.startsWith(`${path}/`),
         );
       if (needsDatabase) await ensureDatabase(env, url);
@@ -379,7 +379,7 @@ const worker = {
         }
       }
 
-      if (["/proj", "/work", "/usr", "/usradmin"].some(
+      if (["/proj", "/work", "/about", "/usr", "/usradmin"].some(
         (path) => url.pathname === path || url.pathname.startsWith(`${path}/`),
       )) {
         const auth = await getAuth(request, env.DB);

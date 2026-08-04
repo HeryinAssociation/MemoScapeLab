@@ -495,12 +495,13 @@ export function EditorApp({
       }
       return;
     }
-    localStorage.setItem("adaptive-pannellum-editor-draft", exportJson);
+    localStorage.setItem("memoscape-lab-editor-draft", exportJson);
     setNotice("草稿已保存在当前设备");
   };
 
   const restoreDraft = () => {
-    const draft = localStorage.getItem("adaptive-pannellum-editor-draft");
+    const draft = localStorage.getItem("memoscape-lab-editor-draft")
+      ?? localStorage.getItem("adaptive-pannellum-editor-draft");
     if (!draft) {
       setNotice("当前设备上没有已保存草稿");
       return;
@@ -535,10 +536,10 @@ export function EditorApp({
       <header className="editor-header">
         <div className="editor-brand">
           <span className="brand-mark" aria-hidden="true">
-            AP
+            ML
           </span>
           <span>
-            <strong>Adaptive Pannellum</strong>
+            <strong>MemoscapeLab</strong>
             <small>投影调参工作台 / EDITOR 02</small>
           </span>
         </div>

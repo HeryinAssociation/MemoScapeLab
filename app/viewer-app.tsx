@@ -110,7 +110,7 @@ export function ViewerApp({
     <main className={`project-viewer ${embedded ? "is-embedded" : ""}`}>
       {!embedded && <header className="project-viewer-bar">
         <div>
-          <span className="viewer-brand-mark">AP</span>
+          <span className="viewer-brand-mark">ML</span>
           <span>
             <small>{embedded ? "PUBLISH PREVIEW" : "PROJECT VIEWER"}</small>
             <strong>{project?.title ?? "正在读取项目"}</strong>

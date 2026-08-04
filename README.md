@@ -1,4 +1,4 @@
-# Adaptive Pannellum
+# MemoscapeLab（记忆空间实验室）
 
 AI 历史照片自适应沉浸式渲染器与可视化调参工作台。项目在 Pannellum 完整球面、有限球面之外，加入独立 WebGL 弧形照片渲染器，使平面、圆柱和球面投影可以连续混合。
 
@@ -42,7 +42,7 @@ pnpm dev
 首次访问 `/` 会进入 `/login`。请先复制 `.dev.vars.example` 为 `.dev.vars`，为
 `SUPERADMIN_PASSWORD` 和 `PASSWORD_PEPPER` 设置不同的强随机值。应用仅在配置了
 `SUPERADMIN_PASSWORD` 时自动创建超级管理员；默认用户名是 `superadmin`，默认邮箱是
-`admin@adaptivepannellum.local`，也可以通过相应环境变量覆盖。部署时必须将这些敏感值设置为
+`admin@memoscapelab.local`，也可以通过相应环境变量覆盖。部署时必须将这些敏感值设置为
 Cloudflare Secret，不能写入源码或提交到 Git。
 
 邮箱验证默认使用腾讯云 SES 的 6 位验证码。先在腾讯云 SES 控制台创建并审核邮件模板，模板只需一个变量 `{{code}}`，可直接上传 [`docs/tencent-ses-email-verification-template.html`](docs/tencent-ses-email-verification-template.html)。复制 `.dev.vars.example` 为 `.dev.vars`，填入新建的子用户密钥和已审核模板 ID 后，本地开发服务器也会真实调用 SES 发信。未配置邮件服务时，本地页面会显示开发验证码，非本地环境不会伪装为已发送或已验证。未验证邮箱只能进入验证页和用户设置，不能访问项目工作台。
@@ -60,7 +60,7 @@ node --import tsx --test tests/scene-validator.test.ts tests/rendered-html.test.
 
 ## 场景配置
 
-根路径会根据 Session 进入 `/login` 或 `/proj`；`/work` 为项目工作台，`/usr` 为用户设置，`/usradmin` 为超级管理员用户目录，`/viewer` 为配置后的成片浏览页面。示例配置位于 `public/configs/`。弧形照片配置结构为：
+根路径会根据 Session 进入 `/login` 或 `/proj`；`/work` 为项目工作台，`/about` 为项目介绍，`/usr` 为用户设置，`/usradmin` 为超级管理员用户目录，`/viewer` 为配置后的成片浏览页面。示例配置位于 `public/configs/`。弧形照片配置结构为：
 
 ```json
 {
