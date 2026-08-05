@@ -13,6 +13,18 @@ TENCENT_SES_REGION=ap-guangzhou
 TENCENT_SES_FROM=MemoscapeLab <verify@mail.metaconstr.net>
 TENCENT_SES_TEMPLATE_ID=replace_with_an_approved_template_id
 
+# Project image and avatar storage: Tencent LighthouseCOS. Keep these credentials separate from
+# the SES sender credentials and grant only the two buckets below.
+TENCENT_LIGHTCOS_ACCOUNT_ID=100020696386
+TENCENT_LIGHTCOS_APP_ID=1306930939
+TENCENT_LIGHTCOS_REGION=ap-shanghai
+TENCENT_LIGHTCOS_ARCHIVE_BUCKET=memoscape-archive-1306930939
+TENCENT_LIGHTCOS_MEDIA_BUCKET=memoscape-media-1306930939
+TENCENT_LIGHTCOS_SECRET_ID=replace_with_a_dedicated_cos_secret_id
+TENCENT_LIGHTCOS_SECRET_KEY=replace_with_a_dedicated_cos_secret_key
+# Leave blank until the published image domain is ready.
+TENCENT_LIGHTCOS_PUBLIC_DOMAIN=
+
 # Optional alternative provider.
 # EMAIL_PROVIDER=resend
 # RESEND_API_KEY=re_replace_with_your_api_key

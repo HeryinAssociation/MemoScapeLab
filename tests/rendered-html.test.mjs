@@ -110,6 +110,9 @@ test("provides the four-step project workbench", async () => {
   assert.match(html, /投影调参/);
   assert.match(html, /发布/);
   assert.match(html, /影像元数据/);
+  assert.match(html, /LIGHTCOS/);
+  assert.match(html, /最大 10 MB/);
+  assert.match(html, /最大 50 MB/);
 });
 
 test("keeps the database-backed project viewer available on its own route", async () => {

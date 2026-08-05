@@ -2,7 +2,7 @@
 
 AI 历史照片自适应沉浸式渲染器与可视化调参工作台。项目在 Pannellum 完整球面、有限球面之外，加入独立 WebGL 弧形照片渲染器，使平面、圆柱和球面投影可以连续混合。
 
-当前同时提供本地管理后台：D1 保存项目、元数据与完整场景 JSON，R2 保存上传的原图和宽幅 / 全景照片。
+当前同时提供本地管理后台：D1 保存项目、资源索引、元数据与完整场景 JSON；腾讯云轻量对象存储（LighthouseCOS）保存项目原图、宽幅 / 全景照片和用户头像，R2 仅用于兼容既有资源。
 
 ## 当前能力
 
@@ -25,6 +25,7 @@ AI 历史照片自适应沉浸式渲染器与可视化调参工作台。项目�
 - `/proj` 项目卡片管理与持久化项目库；
 - `/work` 上传、生成预留、投影调参、发布预留四步工作流；
 - 项目卡片可重新进入工作台并加载已保存的全部参数。
+- LighthouseCOS 双桶图床、同源后端代理上传、上传进度、服务端对象校验与私有资源访问链接；
 - D1 用户、服务端 Session、HttpOnly Cookie 与项目所有权隔离；
 - 注册、登录、登出、头像、用户设置和安全改密；
 - 30 分钟邮箱验证码、腾讯云 SES 真实邮件发送与 Resend 兼容接口；
@@ -48,6 +49,12 @@ Cloudflare Secret，不能写入源码或提交到 Git。
 邮箱验证默认使用腾讯云 SES 的 6 位验证码。先在腾讯云 SES 控制台创建并审核邮件模板，模板只需一个变量 `{{code}}`，可直接上传 [`docs/tencent-ses-email-verification-template.html`](docs/tencent-ses-email-verification-template.html)。复制 `.dev.vars.example` 为 `.dev.vars`，填入新建的子用户密钥和已审核模板 ID 后，本地开发服务器也会真实调用 SES 发信。未配置邮件服务时，本地页面会显示开发验证码，非本地环境不会伪装为已发送或已验证。未验证邮箱只能进入验证页和用户设置，不能访问项目工作台。
 
 腾讯云密钥必须保存在被 Git 忽略的 `.dev.vars` 或部署环境 Secret 中，不能提交到仓库。建议为发信单独创建最小权限的 CAM 子用户，不要使用主账号永久密钥。
+
+### LightCOS 图床
+
+项目图片使用上海地域的两个私有存储桶：`memoscape-archive-1306930939` 保存历史原图，`memoscape-media-1306930939` 保存全景图、后续缩略图和用户头像。复制 `.dev.vars.example` 中的 `TENCENT_LIGHTCOS_*` 配置到 `.dev.vars`，并填入专用于这两个桶的 CAM 子用户 SecretId 与 SecretKey。不要复用主账号密钥，也不要把密钥提交到 Git。
+
+本项目使用的是轻量对象存储（Lighthouse 版）：浏览器只访问 MemoScapeLab 同源接口，由后端使用 COS 对象级 API 上传和读取文件，因此不依赖存储桶 CORS。历史原图限制为 10MB，全景图限制为 50MB；上传仅接受 JPG/JPEG、PNG、WebP。未来正式域名确定后可写入 `TENCENT_LIGHTCOS_PUBLIC_DOMAIN`，但当前公开访问仍由 MemoScapeLab 的稳定资源 URL 控制。
 
 ## 构建与测试
 

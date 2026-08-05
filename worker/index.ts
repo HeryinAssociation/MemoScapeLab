@@ -2,6 +2,9 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import {
+  CREATE_ASSETS_OWNER_INDEX,
+  CREATE_ASSETS_PROJECT_INDEX,
+  CREATE_ASSETS_TABLE,
   CREATE_PROJECTS_OWNER_INDEX,
   CREATE_PROJECTS_TABLE,
   CREATE_PROJECTS_UPDATED_INDEX,
@@ -20,12 +23,22 @@ import {
   type D1Database,
   type R2Bucket,
 } from "./auth";
+import {
+  createLightCosPresignedUrl,
+  inspectLightCosObject,
+  lightCosBucketForKind,
+  lightCosConfigFromEnv,
+  missingLightCosBindings,
+  validateLightCosUpload,
+  type LightCosAssetKind,
+  type LightCosBindings,
+} from "./lightcos";
 
 interface Fetcher {
   fetch(request: Request): Promise<Response>;
 }
 
-interface Env extends AuthEnv {
+interface Env extends AuthEnv, LightCosBindings {
   ASSETS: Fetcher;
   DB: D1Database;
   MEDIA: R2Bucket;
@@ -55,6 +68,25 @@ interface ProjectRow {
   updated_at: string;
 }
 
+interface AssetRow {
+  id: string;
+  project_id: string | null;
+  owner_user_id: string;
+  kind: LightCosAssetKind;
+  storage_provider: "lightcos";
+  bucket: string;
+  region: string;
+  object_key: string;
+  original_filename: string;
+  content_type: string;
+  byte_size: number;
+  etag: string;
+  visibility: "private" | "published";
+  status: "pending" | "ready" | "failed";
+  created_at: string;
+  updated_at: string;
+}
+
 function projectFromRow(row: ProjectRow) {
   return {
     id: row.id,
@@ -79,6 +111,9 @@ async function ensureDatabase(env: Env, url: URL) {
   await db.batch([
     db.prepare(CREATE_PROJECTS_TABLE),
     db.prepare(CREATE_PROJECTS_UPDATED_INDEX),
+    db.prepare(CREATE_ASSETS_TABLE),
+    db.prepare(CREATE_ASSETS_PROJECT_INDEX),
+    db.prepare(CREATE_ASSETS_OWNER_INDEX),
   ]);
   const columns = await db.prepare("PRAGMA table_info(projects)").all<{ name: string }>();
   if (!columns.results.some((column) => column.name === "owner_user_id")) {
@@ -178,6 +213,32 @@ function normalizedProjectInput(body: Record<string, unknown>, id?: string) {
   };
 }
 
+function assetIdFromUrl(value: string) {
+  return value.match(/^\/api\/assets\/([0-9a-f-]{36})$/i)?.[1] ?? null;
+}
+
+async function linkProjectAssets(
+  db: D1Database,
+  ownerUserId: string,
+  projectId: string,
+  urls: string[],
+  publicationStatus: string,
+) {
+  const assetIds = urls.map(assetIdFromUrl).filter((value): value is string => Boolean(value));
+  if (!assetIds.length) return;
+  const now = new Date().toISOString();
+  await db.batch(assetIds.map((assetId) => db.prepare(`
+    UPDATE assets SET project_id = ?, visibility = ?, updated_at = ?
+    WHERE id = ? AND owner_user_id = ?
+  `).bind(
+    projectId,
+    publicationStatus === "published" ? "published" : "private",
+    now,
+    assetId,
+    ownerUserId,
+  )));
+}
+
 async function handleProjectsApi(request: Request, env: Env, url: URL) {
   const auth = await getAuth(request, env.DB);
   if (auth?.user.must_change_password) {
@@ -224,6 +285,13 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
         now,
       )
       .run();
+    await linkProjectAssets(
+      env.DB,
+      auth.user.id,
+      project.id,
+      [project.originalImageUrl, project.panoramaImageUrl],
+      project.publicationStatus,
+    );
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id = ?")
       .bind(project.id)
       .first<ProjectRow>();
@@ -283,6 +351,13 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
         id,
       )
       .run();
+    await linkProjectAssets(
+      env.DB,
+      auth.user.id,
+      id,
+      [project.originalImageUrl, project.panoramaImageUrl],
+      project.publicationStatus,
+    );
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id = ?")
       .bind(id)
       .first<ProjectRow>();
@@ -293,31 +368,194 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
 }
 
 async function handleAssetsApi(request: Request, env: Env, url: URL) {
-  if (url.pathname === "/api/assets" && request.method === "POST") {
+  if (url.pathname === "/api/assets/upload-intent" && request.method === "POST") {
     const auth = await getAuth(request, env.DB);
     if (!auth) return json({ error: "请先登录。" }, { status: 401 });
     if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
     if (auth.user.must_change_password) return json({ error: "请先修改临时密码。" }, { status: 403 });
     if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
-    const form = await request.formData();
-    const file = form.get("file");
-    if (!(file instanceof File) || !file.type.startsWith("image/")) {
-      return json({ error: "请选择有效的图片文件。" }, { status: 400 });
+
+    const config = lightCosConfigFromEnv(env);
+    if (!config) {
+      return json({
+        error: `LightCOS 配置不完整，缺少：${missingLightCosBindings(env).join("、")}。`,
+      }, { status: 503 });
     }
-    if (file.size > 30 * 1024 * 1024) {
-      return json({ error: "单张图片不能超过 30 MB。" }, { status: 413 });
+
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const kind = String(body?.kind ?? "") as LightCosAssetKind;
+    if (!(["original", "panorama", "thumbnail"] as string[]).includes(kind)) {
+      return json({ error: "图片用途无效。" }, { status: 400 });
     }
-    const extension = file.name.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase() ?? "";
-    const key = `users/${auth.user.id}/projects/${crypto.randomUUID()}${extension}`;
-    await env.MEDIA.put(key, file.stream(), {
-      httpMetadata: { contentType: file.type },
-    });
-    return json({ key, url: `/api/assets/${encodeURIComponent(key)}` }, { status: 201 });
+    const contentType = String(body?.contentType ?? "").toLowerCase();
+    const byteSize = Number(body?.size ?? 0);
+    let extension = "";
+    try {
+      extension = validateLightCosUpload(kind, contentType, byteSize).extension;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "图片参数无效。";
+      return json({ error: message }, { status: message.includes("不能超过") ? 413 : 400 });
+    }
+
+    const projectId = String(body?.projectId ?? "").trim() || null;
+    if (projectId) {
+      const project = await env.DB.prepare(
+        "SELECT id FROM projects WHERE id = ? AND owner_user_id = ?",
+      ).bind(projectId, auth.user.id).first<{ id: string }>();
+      if (!project) return json({ error: "项目不存在或无权上传素材。" }, { status: 404 });
+    }
+
+    const assetId = crypto.randomUUID();
+    const bucket = lightCosBucketForKind(config, kind);
+    const projectSegment = projectId ?? "unassigned";
+    const objectKey = `users/${auth.user.id}/projects/${projectSegment}/${kind}/${assetId}${extension}`;
+    const originalFilename = String(body?.filename ?? "image").trim().slice(0, 240) || `image${extension}`;
+    const now = new Date().toISOString();
+    await env.DB.prepare(`
+      INSERT INTO assets (
+        id, project_id, owner_user_id, kind, storage_provider,
+        bucket, region, object_key, original_filename, content_type,
+        byte_size, visibility, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'lightcos', ?, ?, ?, ?, ?, ?, 'private', 'pending', ?, ?)
+    `).bind(
+      assetId,
+      projectId,
+      auth.user.id,
+      kind,
+      bucket,
+      config.region,
+      objectKey,
+      originalFilename,
+      contentType,
+      byteSize,
+      now,
+      now,
+    ).run();
+
+    return json({
+      assetId,
+      uploadUrl: `/api/assets/${encodeURIComponent(assetId)}/content`,
+      contentType,
+    }, { status: 201 });
+  }
+
+  const contentMatch = url.pathname.match(/^\/api\/assets\/([^/]+)\/content$/);
+  if (contentMatch && request.method === "PUT") {
+    const auth = await getAuth(request, env.DB);
+    if (!auth) return json({ error: "请先登录。" }, { status: 401 });
+    if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
+    if (auth.user.must_change_password) return json({ error: "请先修改临时密码。" }, { status: 403 });
+    if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
+    const assetId = decodeURIComponent(contentMatch[1]);
+    const asset = await env.DB.prepare(
+      "SELECT * FROM assets WHERE id = ? AND owner_user_id = ?",
+    ).bind(assetId, auth.user.id).first<AssetRow>();
+    if (!asset) return json({ error: "上传记录不存在。" }, { status: 404 });
+    if (asset.status !== "pending") return json({ error: "该上传任务已经结束。" }, { status: 409 });
+
+    const contentType = String(request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (contentType !== asset.content_type) {
+      return json({ error: "上传文件类型与登记信息不一致。" }, { status: 400 });
+    }
+
+    const config = lightCosConfigFromEnv(env);
+    if (!config) {
+      return json({
+        error: `LightCOS 配置不完整，缺少：${missingLightCosBindings(env).join("、")}。`,
+      }, { status: 503 });
+    }
+    try {
+      const bytes = await request.arrayBuffer();
+      if (bytes.byteLength !== asset.byte_size) {
+        throw new Error("接收到的文件大小与登记信息不一致。");
+      }
+      validateLightCosUpload(asset.kind, asset.content_type, bytes.byteLength);
+      const uploadUrl = await createLightCosPresignedUrl({
+        config,
+        method: "PUT",
+        bucket: asset.bucket,
+        key: asset.object_key,
+        expiresInSeconds: 5 * 60,
+      });
+      const uploadResponse = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "content-type": asset.content_type },
+        body: bytes,
+      });
+      if (!uploadResponse.ok) {
+        throw new Error(`LightCOS 写入失败（HTTP ${uploadResponse.status}）。`);
+      }
+
+      const remote = await inspectLightCosObject(config, asset.bucket, asset.object_key);
+      if (remote.size !== asset.byte_size) throw new Error("上传后的文件大小与原文件不一致。");
+      if (remote.contentType && remote.contentType !== asset.content_type) {
+        throw new Error("上传后的文件类型与原文件不一致。");
+      }
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        "UPDATE assets SET etag = ?, status = 'ready', updated_at = ? WHERE id = ?",
+      ).bind(remote.etag, now, assetId).run();
+      return json({
+        asset: {
+          id: assetId,
+          kind: asset.kind,
+          contentType: asset.content_type,
+          size: asset.byte_size,
+          url: `/api/assets/${encodeURIComponent(assetId)}`,
+        },
+      });
+    } catch (caught) {
+      await env.DB.prepare("UPDATE assets SET status = 'failed', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), assetId)
+        .run();
+      return json({ error: caught instanceof Error ? caught.message : "LightCOS 文件校验失败。" }, { status: 502 });
+    }
   }
 
   const match = url.pathname.match(/^\/api\/assets\/([^/]+)$/);
   if (match && request.method === "GET") {
-    const object = await env.MEDIA.get(decodeURIComponent(match[1]));
+    const assetIdOrLegacyKey = decodeURIComponent(match[1]);
+    const asset = await env.DB.prepare(`
+      SELECT assets.*, projects.publication_status AS project_publication_status
+      FROM assets
+      LEFT JOIN projects ON projects.id = assets.project_id
+      WHERE assets.id = ?
+    `).bind(assetIdOrLegacyKey).first<AssetRow & { project_publication_status: string | null }>();
+
+    if (asset) {
+      const auth = await getAuth(request, env.DB);
+      const canRead =
+        auth?.user.id === asset.owner_user_id ||
+        asset.visibility === "published" ||
+        asset.project_publication_status === "published";
+      if (!canRead || asset.status !== "ready") return new Response("Not found", { status: 404 });
+      const config = lightCosConfigFromEnv(env);
+      if (!config) return new Response("LightCOS is not configured", { status: 503 });
+      const signedUrl = await createLightCosPresignedUrl({
+        config,
+        method: "GET",
+        bucket: asset.bucket,
+        key: asset.object_key,
+        expiresInSeconds: 5 * 60,
+      });
+      const remote = await fetch(signedUrl, { method: "GET" });
+      if (!remote.ok || !remote.body) {
+        return new Response("LightCOS object unavailable", { status: 502 });
+      }
+      return new Response(remote.body, {
+        status: remote.status,
+        headers: {
+          "content-type": remote.headers.get("content-type") ?? asset.content_type,
+          "content-length": remote.headers.get("content-length") ?? String(asset.byte_size),
+          etag: remote.headers.get("etag") ?? asset.etag,
+          "cache-control": canRead && auth?.user.id !== asset.owner_user_id
+            ? "public, max-age=3600"
+            : "private, no-store",
+        },
+      });
+    }
+
+    const object = await env.MEDIA.get(assetIdOrLegacyKey);
     if (!object) return new Response("Not found", { status: 404 });
     return new Response(object.body, {
       headers: {

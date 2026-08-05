@@ -16,7 +16,7 @@ import {
   type ImmersiveScene,
 } from "@/src/core/projection-types";
 import { MODE_LABELS, type PanoramaProject } from "@/src/projects/types";
-import { authenticatedFetch } from "@/src/auth/client";
+import { authenticatedFetch, getCurrentAuth } from "@/src/auth/client";
 
 interface WorkbenchDraft {
   id?: string;
@@ -38,6 +38,56 @@ const STEPS = [
   { id: 3, title: "投影调参", short: "CALIBRATE" },
   { id: 4, title: "发布", short: "PUBLISH" },
 ] as const;
+
+type UploadKind = "original" | "panorama";
+
+const UPLOAD_LIMITS: Record<UploadKind, number> = {
+  original: 10 * 1024 * 1024,
+  panorama: 50 * 1024 * 1024,
+};
+
+const ALLOWED_UPLOAD_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function uploadFileThroughBackend(
+  uploadUrl: string,
+  file: File,
+  csrfToken: string,
+  onProgress: (percent: number) => void,
+) {
+  return new Promise<string>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", uploadUrl);
+    request.setRequestHeader("Content-Type", file.type);
+    request.setRequestHeader("x-csrf-token", csrfToken);
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    });
+    request.addEventListener("load", () => {
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(100);
+        try {
+          const payload = JSON.parse(request.responseText) as { asset?: { url?: string } };
+          if (!payload.asset?.url) throw new Error("上传接口没有返回图片地址。");
+          resolve(payload.asset.url);
+        } catch (caught) {
+          reject(caught instanceof Error ? caught : new Error("无法读取图片上传结果。"));
+        }
+      } else {
+        const message = (() => {
+          try {
+            return (JSON.parse(request.responseText) as { error?: string }).error;
+          } catch {
+            return "";
+          }
+        })();
+        reject(new Error(message || `LightCOS 上传失败（HTTP ${request.status}）。`));
+      }
+    });
+    request.addEventListener("error", () => reject(new Error("无法连接 MemoScapeLab 图片上传接口。")));
+    request.addEventListener("abort", () => reject(new Error("图片上传已取消。")));
+    request.send(file);
+  });
+}
 
 function sceneCoverage(scene: ImmersiveScene) {
   if (isPartialSphereProjection(scene.projection)) {
@@ -101,6 +151,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
   const [loading, setLoading] = useState(Boolean(projectId));
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState<"original" | "panorama" | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [notice, setNotice] = useState(projectId ? "正在载入项目" : "新项目尚未保存");
   const [error, setError] = useState("");
   const [viewerRevision, setViewerRevision] = useState(0);
@@ -209,16 +260,38 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     [draft, projectPayload, step],
   );
 
-  const uploadFile = useCallback(async (file: File) => {
-    const form = new FormData();
-    form.set("file", file);
-    const response = await authenticatedFetch("/api/assets", { method: "POST", body: form });
-    const payload = (await response.json()) as { url?: string; error?: string };
-    if (!response.ok || !payload.url) {
-      throw new Error(payload.error ?? "图片上传失败");
+  const uploadFile = useCallback(async (file: File, kind: UploadKind) => {
+    if (!ALLOWED_UPLOAD_TYPES.has(file.type)) {
+      throw new Error("仅支持 JPG/JPEG、PNG 和 WebP 图片。");
     }
-    return payload.url;
-  }, []);
+    if (file.size > UPLOAD_LIMITS[kind]) {
+      throw new Error(`${kind === "original" ? "历史原图" : "全景图"}不能超过 ${UPLOAD_LIMITS[kind] / 1024 / 1024} MB。`);
+    }
+
+    setUploadProgress(0);
+    const intentResponse = await authenticatedFetch("/api/assets/upload-intent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind,
+        filename: file.name,
+        contentType: file.type,
+        size: file.size,
+        projectId: draft.id,
+      }),
+    });
+    const intent = (await intentResponse.json()) as {
+      assetId?: string;
+      uploadUrl?: string;
+      error?: string;
+    };
+    if (!intentResponse.ok || !intent.assetId || !intent.uploadUrl) {
+      throw new Error(intent.error ?? "无法创建 LightCOS 上传任务。");
+    }
+
+    const auth = await getCurrentAuth();
+    return uploadFileThroughBackend(intent.uploadUrl, file, auth.csrfToken, setUploadProgress);
+  }, [draft.id]);
 
   const uploadSource = async (
     kind: "original" | "panorama",
@@ -228,9 +301,10 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     event.target.value = "";
     if (!file) return;
     setUploading(kind);
+    setUploadProgress(0);
     setError("");
     try {
-      const url = await uploadFile(file);
+      const url = await uploadFile(file, kind);
       const title = draft.title || file.name.replace(/\.[^.]+$/, "");
       setDraft((current) => {
         const useAsScene = kind === "panorama" || !current.panoramaImageUrl;
@@ -244,24 +318,27 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
           scene: nextScene,
         };
       });
-      setNotice(`${kind === "original" ? "历史原图" : "宽幅照片"}已存入本地素材库`);
+      setNotice(`${kind === "original" ? "历史原图" : "宽幅照片"}已存入 LightCOS 图床`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "图片上传失败");
     } finally {
       setUploading(null);
+      setUploadProgress(0);
     }
   };
 
   const uploadFromEditor = useCallback(
     async (file: File) => {
       setUploading("panorama");
+      setUploadProgress(0);
       try {
-        const url = await uploadFile(file);
+        const url = await uploadFile(file, "panorama");
         setDraft((current) => ({ ...current, panoramaImageUrl: url }));
-        setNotice("调参照片已存入本地素材库");
+        setNotice("调参照片已存入 LightCOS 图床");
         return url;
       } finally {
         setUploading(null);
+        setUploadProgress(0);
       }
     },
     [uploadFile],
@@ -404,6 +481,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                   description="未经扩展的老照片、档案扫描图"
                   imageUrl={draft.originalImageUrl}
                   uploading={uploading === "original"}
+                  progress={uploading === "original" ? uploadProgress : 0}
                   onChange={(event) => void uploadSource("original", event)}
                 />
                 <div className="upload-flow-arrow" aria-hidden="true">→</div>
@@ -413,6 +491,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                   description="已生成的 AIGC 全景或其他宽幅照片"
                   imageUrl={draft.panoramaImageUrl}
                   uploading={uploading === "panorama"}
+                  progress={uploading === "panorama" ? uploadProgress : 0}
                   onChange={(event) => void uploadSource("panorama", event)}
                 />
               </div>
@@ -543,6 +622,7 @@ function UploadPanel({
   description,
   imageUrl,
   uploading,
+  progress,
   onChange,
 }: {
   kind: "original" | "panorama";
@@ -550,6 +630,7 @@ function UploadPanel({
   description: string;
   imageUrl: string;
   uploading: boolean;
+  progress: number;
   onChange: (event: ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
@@ -557,9 +638,10 @@ function UploadPanel({
       {imageUrl && <span className="source-upload-preview" style={{ backgroundImage: `url("${imageUrl}")` }} />}
       <span className="source-upload-index">{kind === "original" ? "A" : "B"}</span>
       <span className="source-upload-icon">{uploading ? "···" : imageUrl ? "↻" : "+"}</span>
-      <strong>{uploading ? "正在保存图片" : imageUrl ? `更换${title}` : `上传${title}`}</strong>
+      <strong>{uploading ? `正在上传 LightCOS · ${progress}%` : imageUrl ? `更换${title}` : `上传${title}`}</strong>
       <small>{description}</small>
-      <em>JPG / PNG / WEBP · 最大 30 MB</em>
+      {uploading && <span className="source-upload-progress" aria-label={`上传进度 ${progress}%`}><i style={{ width: `${progress}%` }} /></span>}
+      <em>{`LIGHTCOS · JPG / PNG / WEBP · 最大 ${kind === "original" ? "10" : "50"} MB`}</em>
       <input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={onChange} hidden />
     </label>
   );

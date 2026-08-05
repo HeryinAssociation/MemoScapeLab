@@ -1,5 +1,14 @@
 import { AUTH_SCHEMA_STATEMENTS } from "../db/schema";
 import { sendTencentVerificationCodeWithRetry } from "./tencent-ses";
+import {
+  createLightCosPresignedUrl,
+  inspectLightCosObject,
+  lightCosBucketForKind,
+  lightCosConfigFromEnv,
+  missingLightCosBindings,
+  validateLightCosUpload,
+  type LightCosBindings,
+} from "./lightcos";
 
 export interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
@@ -34,7 +43,7 @@ export interface R2Bucket {
   }>;
 }
 
-export interface AuthEnv {
+export interface AuthEnv extends LightCosBindings {
   DB: D1Database;
   MEDIA: R2Bucket;
   PASSWORD_PEPPER?: string;
@@ -488,6 +497,24 @@ async function audit(db: D1Database, adminId: string, targetId: string | null, a
 }
 
 async function deleteUserMedia(env: AuthEnv, userId: string) {
+  const lightCosAssets = await env.DB.prepare(`
+    SELECT id, bucket, object_key FROM assets
+    WHERE owner_user_id = ? AND storage_provider = 'lightcos'
+  `).bind(userId).all<{ id: string; bucket: string; object_key: string }>();
+  const lightCosConfig = lightCosConfigFromEnv(env);
+  if (lightCosConfig) {
+    for (const asset of lightCosAssets.results) {
+      const deleteUrl = await createLightCosPresignedUrl({
+        config: lightCosConfig,
+        method: "DELETE",
+        bucket: asset.bucket,
+        key: asset.object_key,
+        expiresInSeconds: 5 * 60,
+      });
+      await fetch(deleteUrl, { method: "DELETE" });
+    }
+  }
+
   let cursor: string | undefined;
   do {
     const result = await env.MEDIA.list({ prefix: `users/${userId}/`, ...(cursor ? { cursor } : {}) });
@@ -683,16 +710,114 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
     if (!(file instanceof File) || !["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
       return json({ error: "头像仅支持 JPG、PNG 或 WebP 图片。" }, { status: 400 });
     }
-    if (file.size > 5 * 1024 * 1024) return json({ error: "头像不能超过 5 MB。" }, { status: 413 });
-    const extension = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" }[file.type]!;
-    const key = `users/${auth.user.id}/avatars/${crypto.randomUUID()}${extension}`;
-    await env.MEDIA.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
-    if (auth.user.avatar_key) await env.MEDIA.delete(auth.user.avatar_key);
+    let extension = "";
+    try {
+      extension = validateLightCosUpload("avatar", file.type, file.size).extension;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "头像参数无效。";
+      return json({ error: message }, { status: message.includes("不能超过") ? 413 : 400 });
+    }
+
+    const config = lightCosConfigFromEnv(env);
+    if (!config) {
+      return json({
+        error: `LighthouseCOS 配置不完整，缺少：${missingLightCosBindings(env).join("、")}。`,
+      }, { status: 503 });
+    }
+
+    const assetId = crypto.randomUUID();
+    const bucket = lightCosBucketForKind(config, "avatar");
+    const objectKey = `users/${auth.user.id}/avatars/${assetId}${extension}`;
     const now = new Date().toISOString();
-    await env.DB.prepare("UPDATE users SET avatar_key = ?, updated_at = ? WHERE id = ?")
-      .bind(key, now, auth.user.id)
-      .run();
-    return json({ avatarUrl: `/api/users/${encodeURIComponent(auth.user.id)}/avatar?v=${encodeURIComponent(now)}` });
+    await env.DB.prepare(`
+      INSERT INTO assets (
+        id, project_id, owner_user_id, kind, storage_provider,
+        bucket, region, object_key, original_filename, content_type,
+        byte_size, visibility, status, created_at, updated_at
+      ) VALUES (?, NULL, ?, 'avatar', 'lightcos', ?, ?, ?, ?, ?, ?, 'published', 'pending', ?, ?)
+    `).bind(
+      assetId,
+      auth.user.id,
+      bucket,
+      config.region,
+      objectKey,
+      file.name.trim().slice(0, 240) || `avatar${extension}`,
+      file.type,
+      file.size,
+      now,
+      now,
+    ).run();
+
+    try {
+      const uploadUrl = await createLightCosPresignedUrl({
+        config,
+        method: "PUT",
+        bucket,
+        key: objectKey,
+        expiresInSeconds: 5 * 60,
+      });
+      const uploadResponse = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "content-type": file.type },
+        body: await file.arrayBuffer(),
+      });
+      if (!uploadResponse.ok) {
+        throw new Error(`LighthouseCOS 写入失败（HTTP ${uploadResponse.status}）。`);
+      }
+      const remote = await inspectLightCosObject(config, bucket, objectKey);
+      if (remote.size !== file.size) throw new Error("上传后的头像大小与原文件不一致。");
+      if (remote.contentType && remote.contentType !== file.type) {
+        throw new Error("上传后的头像类型与原文件不一致。");
+      }
+
+      const previousAvatar = auth.user.avatar_key;
+      const avatarReference = `lightcos:${assetId}`;
+      await env.DB.batch([
+        env.DB.prepare("UPDATE assets SET etag = ?, status = 'ready', updated_at = ? WHERE id = ?")
+          .bind(remote.etag, now, assetId),
+        env.DB.prepare("UPDATE users SET avatar_key = ?, updated_at = ? WHERE id = ?")
+          .bind(avatarReference, now, auth.user.id),
+      ]);
+
+      try {
+        if (previousAvatar?.startsWith("lightcos:")) {
+          const previousId = previousAvatar.slice("lightcos:".length);
+          const previous = await env.DB.prepare(
+            "SELECT bucket, object_key FROM assets WHERE id = ? AND owner_user_id = ?",
+          ).bind(previousId, auth.user.id).first<{ bucket: string; object_key: string }>();
+          if (previous) {
+            const deleteUrl = await createLightCosPresignedUrl({
+              config,
+              method: "DELETE",
+              bucket: previous.bucket,
+              key: previous.object_key,
+              expiresInSeconds: 5 * 60,
+            });
+            const deleted = await fetch(deleteUrl, { method: "DELETE" });
+            if (deleted.ok || deleted.status === 404) {
+              await env.DB.prepare("DELETE FROM assets WHERE id = ? AND owner_user_id = ?")
+                .bind(previousId, auth.user.id)
+                .run();
+            }
+          }
+        } else if (previousAvatar) {
+          await env.MEDIA.delete(previousAvatar);
+        }
+      } catch {
+        // The new avatar is already active; stale-object cleanup is non-blocking.
+      }
+
+      return json({
+        avatarUrl: `/api/users/${encodeURIComponent(auth.user.id)}/avatar?v=${encodeURIComponent(now)}`,
+      });
+    } catch (caught) {
+      await env.DB.prepare("UPDATE assets SET status = 'failed', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), assetId)
+        .run();
+      return json({
+        error: caught instanceof Error ? caught.message : "LighthouseCOS 头像上传失败。",
+      }, { status: 502 });
+    }
   }
 
   const avatarMatch = bodyPath.match(/^\/api\/users\/([^/]+)\/avatar$/);
@@ -702,6 +827,41 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
       .bind(userId)
       .first<{ avatar_key: string | null }>();
     if (!row?.avatar_key) return new Response("Not found", { status: 404 });
+    if (row.avatar_key.startsWith("lightcos:")) {
+      const assetId = row.avatar_key.slice("lightcos:".length);
+      const asset = await env.DB.prepare(`
+        SELECT bucket, object_key, content_type, byte_size, etag, status
+        FROM assets WHERE id = ? AND owner_user_id = ? AND kind = 'avatar'
+      `).bind(assetId, userId).first<{
+        bucket: string;
+        object_key: string;
+        content_type: string;
+        byte_size: number;
+        etag: string;
+        status: string;
+      }>();
+      if (!asset || asset.status !== "ready") return new Response("Not found", { status: 404 });
+      const config = lightCosConfigFromEnv(env);
+      if (!config) return new Response("LighthouseCOS is not configured", { status: 503 });
+      const readUrl = await createLightCosPresignedUrl({
+        config,
+        method: "GET",
+        bucket: asset.bucket,
+        key: asset.object_key,
+        expiresInSeconds: 5 * 60,
+      });
+      const remote = await fetch(readUrl, { method: "GET" });
+      if (!remote.ok || !remote.body) return new Response("Not found", { status: 404 });
+      return new Response(remote.body, {
+        headers: {
+          "content-type": remote.headers.get("content-type") ?? asset.content_type,
+          "content-length": remote.headers.get("content-length") ?? String(asset.byte_size),
+          etag: remote.headers.get("etag") ?? asset.etag,
+          "cache-control": "public, max-age=3600",
+        },
+      });
+    }
+
     const object = await env.MEDIA.get(row.avatar_key);
     if (!object) return new Response("Not found", { status: 404 });
     return new Response(object.body, {

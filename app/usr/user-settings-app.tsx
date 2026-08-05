@@ -51,7 +51,7 @@ export function UserSettingsApp() {
       const response = await authenticatedFetch("/api/users/me/avatar", { method: "POST", body: form });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "头像上传失败");
-      await refresh(); setMessage("头像已经更新。");
+      await refresh(); setMessage("头像已经更新并保存至图床。");
     } catch (caught) { setError(caught instanceof Error ? caught.message : "头像上传失败"); }
     finally { setBusy(""); }
   };
