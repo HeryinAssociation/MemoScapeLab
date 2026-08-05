@@ -3,14 +3,26 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { EditorApp, INITIAL_SCENE } from "../editor-app";
-import type { ImmersiveScene } from "@/src/core/projection-types";
+import { ViewerApp } from "../viewer-app";
+import {
+  isAdaptiveProjection,
+  isPartialSphereProjection,
+  type ImmersiveScene,
+} from "@/src/core/projection-types";
 import { MODE_LABELS, type PanoramaProject } from "@/src/projects/types";
 import { authenticatedFetch } from "@/src/auth/client";
+import { createWebpThumbnail } from "@/src/images/client-thumbnail";
 import type { ImageGenProviderName } from "@/worker/image-gen/types";
 
 type LoadState = "loading" | "ready" | "error";
 type GenStatus = "idle" | "running" | "succeeded" | "failed";
 type UploadKind = "original" | "panorama";
+type StoredAssetKind = UploadKind | "thumbnail";
+
+interface UploadedAsset {
+  id: string;
+  url: string;
+}
 
 const WORKFLOW_STEPS = [
   { n: 1, label: "上传照片" },
@@ -83,7 +95,9 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
   const saveProject = async (options: {
     title?: string;
     originalImageUrl?: string;
+    originalThumbnailUrl?: string;
     panoramaImageUrl?: string;
+    panoramaThumbnailUrl?: string;
     scene?: ImmersiveScene;
     workflowStep?: number;
   }) => {
@@ -95,7 +109,9 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
       notes,
       mode: project?.mode ?? "curvedPhoto",
       originalImageUrl: options.originalImageUrl ?? project?.originalImageUrl ?? "",
+      originalThumbnailUrl: options.originalThumbnailUrl ?? project?.originalThumbnailUrl ?? "",
       panoramaImageUrl: options.panoramaImageUrl ?? project?.panoramaImageUrl ?? "",
+      panoramaThumbnailUrl: options.panoramaThumbnailUrl ?? project?.panoramaThumbnailUrl ?? "",
       scene,
       workflowStep: options.workflowStep ?? step,
       publicationStatus: project?.publicationStatus ?? "draft",
@@ -117,13 +133,20 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     return payload.project!;
   };
 
-  const uploadAsset = async (file: File, kind: UploadKind) => {
+  const uploadAsset = async (
+    file: File,
+    kind: StoredAssetKind,
+    parentAssetId?: string,
+  ): Promise<UploadedAsset> => {
     if (!ALLOWED_UPLOAD_TYPES.has(file.type)) {
       throw new Error("仅支持 JPG/JPEG、PNG 和 WebP 图片。");
     }
-    if (file.size > UPLOAD_LIMITS[kind]) {
+    if (kind !== "thumbnail" && file.size > UPLOAD_LIMITS[kind]) {
       const label = kind === "original" ? "历史原图" : "宽幅 / 全景照片";
       throw new Error(`${label}不能超过 ${UPLOAD_LIMITS[kind] / 1024 / 1024} MB。`);
+    }
+    if (kind === "thumbnail" && (file.type !== "image/webp" || file.size > 5 * 1024 * 1024)) {
+      throw new Error("缩略图必须为不超过 5 MB 的 WebP 图片。");
     }
 
     const intentResponse = await authenticatedFetch("/api/assets/upload-intent", {
@@ -135,10 +158,11 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
         contentType: file.type,
         size: file.size,
         projectId: project?.id,
+        parentAssetId,
       }),
     });
-    const intent = (await intentResponse.json()) as { uploadUrl?: string; error?: string };
-    if (!intentResponse.ok || !intent.uploadUrl) {
+    const intent = (await intentResponse.json()) as { assetId?: string; uploadUrl?: string; error?: string };
+    if (!intentResponse.ok || !intent.assetId || !intent.uploadUrl) {
       throw new Error(intent.error ?? "无法创建 LightCOS 上传任务");
     }
 
@@ -154,7 +178,19 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     if (!uploadResponse.ok || !uploaded.asset?.url) {
       throw new Error(uploaded.error ?? "LightCOS 上传失败");
     }
-    return uploaded.asset.url;
+    return { id: intent.assetId, url: uploaded.asset.url };
+  };
+
+  const uploadImagePair = async (file: File, kind: UploadKind) => {
+    setMessage(`正在生成 ${kind === "original" ? "历史原图" : "全景图"} WebP 缩略图`);
+    const thumbnail = await createWebpThumbnail(file, file.name, {
+      maxWidth: 1600,
+      maxHeight: 900,
+      quality: 0.82,
+    });
+    const sourceAsset = await uploadAsset(file, kind);
+    const thumbnailAsset = await uploadAsset(thumbnail, "thumbnail", sourceAsset.id);
+    return { source: sourceAsset, thumbnail: thumbnailAsset };
   };
 
   const uploadSource = async (kind: UploadKind, event: ChangeEvent<HTMLInputElement>) => {
@@ -165,17 +201,21 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     try {
       const label = kind === "original" ? "历史原图" : "宽幅 / 全景照片";
       setMessage(`正在上传${label}：${file.name}`);
-      const url = await uploadAsset(file, kind);
+      const pair = await uploadImagePair(file, kind);
+      const url = pair.source.url;
+      const thumbnailUrl = pair.thumbnail.url;
       const nextTitle = title || file.name.replace(/\.[^.]+$/, "");
       if (!title) setTitle(nextTitle);
       const currentScene = project?.scene ?? INITIAL_SCENE;
       const scene = kind === "panorama" || !project
-        ? { ...currentScene, title: nextTitle, source: url }
+        ? { ...currentScene, title: nextTitle, source: url, thumbnail: thumbnailUrl }
         : currentScene;
       await saveProject({
         title: nextTitle,
         originalImageUrl: kind === "original" ? url : undefined,
+        originalThumbnailUrl: kind === "original" ? thumbnailUrl : undefined,
         panoramaImageUrl: kind === "panorama" ? url : undefined,
+        panoramaThumbnailUrl: kind === "panorama" ? thumbnailUrl : undefined,
         scene,
         workflowStep: project?.workflowStep ?? 1,
       });
@@ -185,6 +225,28 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     } finally {
       setUploading(null);
     }
+  };
+
+  const storeGeneratedPanorama = async (sourceUrl: string, taskId: string) => {
+    const response = await fetch(sourceUrl);
+    if (!response.ok) throw new Error("无法读取刚生成的全景图。");
+    const blob = await response.blob();
+    const contentType = ALLOWED_UPLOAD_TYPES.has(blob.type) ? blob.type : "image/png";
+    const extension = contentType === "image/jpeg" ? "jpg" : contentType.split("/")[1];
+    const file = new File([blob], `aigc-${taskId}.${extension}`, { type: contentType });
+    const pair = await uploadImagePair(file, "panorama");
+    const currentScene = project?.scene ?? INITIAL_SCENE;
+    await saveProject({
+      panoramaImageUrl: pair.source.url,
+      panoramaThumbnailUrl: pair.thumbnail.url,
+      scene: {
+        ...currentScene,
+        source: pair.source.url,
+        thumbnail: pair.thumbnail.url,
+        metadata: { ...currentScene.metadata, aiExpanded: true },
+      },
+      workflowStep: 2,
+    });
   };
 
   const startGenerate = async () => {
@@ -228,18 +290,12 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
         if (!response.ok) throw new Error(payload.error ?? "任务查询失败");
         if (payload.status === "succeeded") {
           stopPolling();
+          const generatedUrl = payload.images?.[0]?.url;
+          if (!generatedUrl) throw new Error("生成任务没有返回全景图片。");
+          setMessage("正在生成缩略图并保存全景文件");
+          await storeGeneratedPanorama(generatedUrl, taskId);
           setGenStatus("succeeded");
-          setMessage("全景生成完成");
-          const projectResponse = await authenticatedFetch(
-            `/api/projects/${encodeURIComponent(project?.id ?? "")}`,
-          );
-          const projectPayload = (await projectResponse.json()) as {
-            project?: PanoramaProject;
-            error?: string;
-          };
-          if (projectResponse.ok && projectPayload.project) {
-            setProject(projectPayload.project);
-          }
+          setMessage("全景图与 WebP 缩略图已保存");
         } else if (payload.status === "failed") {
           stopPolling();
           setGenStatus("failed");
@@ -256,41 +312,12 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     }, 3000);
   };
 
-  const publishProject = async () => {
-    if (!project) return;
-    try {
-      const body = {
-        title,
-        captureTime,
-        location,
-        notes,
-        mode: project.mode,
-        originalImageUrl: project.originalImageUrl,
-        panoramaImageUrl: project.panoramaImageUrl,
-        scene: project.scene,
-        workflowStep: 4,
-        publicationStatus: "published",
-      };
-      const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const payload = (await response.json()) as { project?: PanoramaProject; error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "发布失败");
-      setProject(payload.project!);
-      setMessage("项目已发布");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "发布失败");
-    }
-  };
-
   const saveScene = async (scene: ImmersiveScene) => {
     await saveProject({ scene, workflowStep: 3 });
     setMessage("投影参数已保存到数据库");
   };
 
-  const cover = project?.panoramaImageUrl || project?.originalImageUrl;
+  const cover = project?.panoramaThumbnailUrl || project?.originalThumbnailUrl || project?.panoramaImageUrl || project?.originalImageUrl;
 
   return (
     <main className="workbench-page">
@@ -299,7 +326,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
           <Link href="/proj">← 返回项目库</Link>
           <span />
           <span>
-            <small>ADAPTIVE PANNELLUM / WORKBENCH</small>
+            <small>MEMOSCAPELAB / WORKBENCH</small>
             <strong>{title || project?.title || "新建照片项目"}</strong>
           </span>
         </div>
@@ -321,8 +348,8 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
             disabled={loadState === "loading"}
             onClick={() => setStep(item.n)}
           >
-            <span>{step > item.n ? "✓" : String(item.n).padStart(2, "0")}</span>
-            <span>
+            <span className="workflow-step-index">{step > item.n ? "✓" : String(item.n).padStart(2, "0")}</span>
+            <span className="workflow-step-copy">
               <small>STEP {String(item.n).padStart(2, "0")}</small>
               <strong>{item.label}</strong>
             </span>
@@ -354,7 +381,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
             <div className="step-intro">
               <span>STEP 01 / 影像来源</span>
               <h1>上传照片</h1>
-              <p>上传历史原图或宽幅照片，并填写影像元数据。保存后即可进入全景生成。</p>
+              <p>上传历史原图或宽幅照片；浏览器会在上传前同步生成 WebP 缩略图。保存后即可进入全景生成。</p>
             </div>
             <div className="source-layout">
               <div className="source-uploads">
@@ -369,7 +396,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                   {project?.originalImageUrl && (
                     <span
                       className="source-upload-preview"
-                      style={{ backgroundImage: `url("${project.originalImageUrl}")` }}
+                      style={{ backgroundImage: `url("${project.originalThumbnailUrl || project.originalImageUrl}")` }}
                     />
                   )}
                   <span className="source-upload-icon">{uploading === "original" ? "···" : "＋"}</span>
@@ -381,7 +408,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                         : "选择历史原图"}
                   </strong>
                   <small>未经扩展的老照片、档案扫描图</small>
-                  <em>LIGHTCOS · JPG / PNG / WEBP · 最大 10 MB</em>
+                  <em>原文件 + WEBP 缩略图 · 最大 10 MB</em>
                 </label>
                 <span className="upload-flow-arrow">→</span>
                 <label className={`source-upload-card ${project?.panoramaImageUrl ? "has-image" : ""}`}>
@@ -404,7 +431,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                         : "上传宽幅 / 全景照片"}
                   </strong>
                   <small>已有的 AIGC 全景或其他宽幅照片（可选）</small>
-                  <em>LIGHTCOS · JPG / PNG / WEBP · 最大 50 MB</em>
+                  <em>原文件 + WEBP 缩略图 · 最大 50 MB</em>
                 </label>
               </div>
 
@@ -462,12 +489,12 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
             <div className="reserved-visual">
               <span
                 className="reserved-image"
-                style={project?.originalImageUrl ? { backgroundImage: `url("${project.originalImageUrl}")` } : undefined}
+                style={project?.originalImageUrl ? { backgroundImage: `url("${project.originalThumbnailUrl || project.originalImageUrl}")` } : undefined}
               />
               <span>→</span>
               <span
                 className="reserved-image panorama"
-                style={project?.panoramaImageUrl ? { backgroundImage: `url("${project.panoramaImageUrl}")` } : undefined}
+                style={project?.panoramaImageUrl ? { backgroundImage: `url("${project.panoramaThumbnailUrl || project.panoramaImageUrl}")` } : undefined}
               />
             </div>
             <h1>生成全景</h1>
@@ -513,6 +540,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
               embedded
               initialScene={project.scene}
               originalImageUrl={project.originalImageUrl}
+              originalImageThumbnailUrl={project.originalThumbnailUrl}
               originalImageTitle="历史照片原照"
               onSave={saveScene}
             />
@@ -521,35 +549,45 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
 
         {loadState === "ready" && step === 4 && project && (
           <div className="publish-step">
-            <div
-              className="publish-preview"
-              style={cover ? { backgroundImage: `url("${cover}")` } : undefined}
-            >
-              <span>{project.publicationStatus === "published" ? "PUBLISHED" : "DRAFT"}</span>
-              <div>
-                <small>{project.captureTime || "年代待考"}</small>
-                <h1>{project.title}</h1>
-              </div>
+            <div className="publish-viewer-wrap">
+              <ViewerApp projectId={project.id} embedded allowFullscreen />
             </div>
             <div className="publish-copy">
-              <span className="eyebrow">PUBLISH</span>
-              <h2>发布项目</h2>
-              <p>发布后项目将以只读方式在成片浏览页展示，供访客沉浸浏览。</p>
-              <dl>
+              <span className="eyebrow">PUBLISH PREVIEW</span>
+              <h2>{project.title}</h2>
+              <p>在工作台内检查最终浏览效果。左侧预览可切换为全屏，不会跳转到单独页面。</p>
+
+              <h3>照片元数据</h3>
+              <dl className="publish-status-list">
+                <div><dt>拍摄时间</dt><dd>{project.captureTime || "未填写"}</dd></div>
+                <div><dt>拍摄地点</dt><dd>{project.location || "未填写"}</dd></div>
                 <div><dt>投影方式</dt><dd>{MODE_LABELS[project.mode]}</dd></div>
                 <div><dt>全景图</dt><dd>{project.panoramaImageUrl ? "已生成" : "未生成"}</dd></div>
-                <div><dt>状态</dt><dd>{project.publicationStatus === "published" ? "已发布" : "草稿"}</dd></div>
+                <div><dt>浏览范围</dt><dd>{project.scene.view.minYaw}° — {project.scene.view.maxYaw}°</dd></div>
+                <div><dt>默认视场</dt><dd>{project.scene.view.hfov}°</dd></div>
               </dl>
-              <button
-                type="button"
-                disabled={project.publicationStatus === "published"}
-                onClick={publishProject}
-              >
-                {project.publicationStatus === "published" ? "已发布" : "发布项目"}
-              </button>
-              <Link className="text-button" href={`/viewer?id=${encodeURIComponent(project.id)}`}>
-                在成片浏览页打开 →
-              </Link>
+
+              <h3>投影参数</h3>
+              <dl className="publish-technical-list">
+                {isPartialSphereProjection(project.scene.projection) && <>
+                  <div><dt>水平覆盖</dt><dd>{project.scene.projection.haov}°</dd></div>
+                  <div><dt>垂直覆盖</dt><dd>{project.scene.projection.vaov}°</dd></div>
+                  <div><dt>垂直偏移</dt><dd>{project.scene.projection.vOffset}°</dd></div>
+                </>}
+                {isAdaptiveProjection(project.scene.projection) && <>
+                  <div><dt>水平 / 垂直覆盖</dt><dd>{project.scene.projection.horizontalSpan}° / {project.scene.projection.verticalSpan}°</dd></div>
+                  <div><dt>水平 / 垂直曲率</dt><dd>{project.scene.projection.horizontalCurvature} / {project.scene.projection.verticalCurvature}</dd></div>
+                  <div><dt>地平线</dt><dd>{project.scene.projection.horizonY}</dd></div>
+                  <div><dt>边缘模式</dt><dd>{project.scene.projection.edgeMode}</dd></div>
+                </>}
+                <div><dt>俯仰范围</dt><dd>{project.scene.view.minPitch}° — {project.scene.view.maxPitch}°</dd></div>
+                <div><dt>视场范围</dt><dd>{project.scene.view.minHfov}° — {project.scene.view.maxHfov}°</dd></div>
+              </dl>
+
+              <div className="publish-notes">
+                <strong>文字备注</strong>
+                <p>{project.notes || "暂无文字备注。"}</p>
+              </div>
             </div>
           </div>
         )}

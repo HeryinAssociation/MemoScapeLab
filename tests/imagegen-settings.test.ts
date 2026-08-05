@@ -19,6 +19,8 @@ import { ImageGenError } from "../worker/image-gen/types";
 // 固定 32 字节主密钥（base64），避免依赖随机性
 const TEST_KEY_BASE64 = btoa(String.fromCharCode(...Array.from({ length: 32 }, (_, i) => i + 1)));
 const OTHER_KEY_BASE64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
+const USER_A = "user-a";
+const USER_B = "user-b";
 
 function env(overrides: Record<string, string> = {}) {
   return { SETTINGS_ENCRYPTION_KEY: TEST_KEY_BASE64, ...overrides };
@@ -26,7 +28,7 @@ function env(overrides: Record<string, string> = {}) {
 
 /** 内存版 settings mock：SELECT 返回 store 内容，INSERT OR REPLACE 写回。 */
 function settingsDb(initial: Record<string, string> = {}) {
-  const store = new Map(Object.entries(initial));
+  const store = new Map(Object.entries(initial).map(([key, value]) => [`${USER_A}\u0000${key}`, value]));
   const makeStatement = (query: string): D1PreparedStatement => {
     let values: unknown[] = [];
     const statement = {
@@ -38,14 +40,19 @@ function settingsDb(initial: Record<string, string> = {}) {
         return null;
       },
       async all() {
-        if (/SELECT key, value FROM settings/i.test(query)) {
-          return { results: [...store.entries()].map(([key, value]) => ({ key, value })) };
+        if (/SELECT key, value FROM user_imagegen_settings/i.test(query)) {
+          const prefix = `${String(values[0])}\u0000`;
+          return {
+            results: [...store.entries()]
+              .filter(([key]) => key.startsWith(prefix))
+              .map(([key, value]) => ({ key: key.slice(prefix.length), value })),
+          };
         }
         return { results: [] };
       },
       async run() {
-        if (/INSERT OR REPLACE INTO settings/i.test(query)) {
-          store.set(String(values[0]), String(values[1]));
+        if (/INSERT INTO user_imagegen_settings/i.test(query)) {
+          store.set(`${String(values[0])}\u0000${String(values[1])}`, String(values[2]));
         }
         return {};
       },
@@ -58,8 +65,13 @@ function settingsDb(initial: Record<string, string> = {}) {
       await Promise.all(statements.map((statement) => statement.run()));
       return [];
     },
-    store() {
-      return Object.fromEntries(store);
+    store(userId = USER_A) {
+      const prefix = `${userId}\u0000`;
+      return Object.fromEntries(
+        [...store.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([key, value]) => [key.slice(prefix.length), value]),
+      );
     },
   };
   return db as D1Database & { store(): Record<string, string> };
@@ -108,7 +120,7 @@ test("settings：保存后密钥为密文且可解密、明文字段原样入库
   const db = settingsDb();
   await saveImageGenSettings(
     db,
-    "admin-test",
+    USER_A,
     {
       provider: "seedream",
       providers: { seedream: { model: "doubao-seedream-4-0", baseUrl: "", apiKey: "ark-secret-1" } },
@@ -130,7 +142,7 @@ test("settings：未配置主密钥时保存密钥抛 unconfigured", async () =>
     () =>
       saveImageGenSettings(
         db,
-        "admin-test",
+        USER_A,
         { provider: "seedream", providers: { seedream: { apiKey: "ark-secret-1" } } } as ImageGenSettingsInput,
         {},
       ),
@@ -141,7 +153,7 @@ test("settings：未配置主密钥时保存密钥抛 unconfigured", async () =>
 test("settings：未知厂商抛 invalid_input", async () => {
   const db = settingsDb();
   await assert.rejects(
-    () => saveImageGenSettings(db, "admin-test", { provider: "stability" } as unknown as ImageGenSettingsInput, env()),
+    () => saveImageGenSettings(db, USER_A, { provider: "stability" } as unknown as ImageGenSettingsInput, env()),
     (error: unknown) => error instanceof ImageGenError && error.code === "invalid_input",
   );
 });
@@ -154,9 +166,9 @@ test("settings：DB 密钥返回掩码、不回传明文", async () => {
     "imagegen.SEEDREAM_MODEL": "doubao-seedream-4-0",
     "imagegen.ARK_API_KEY": cipher,
   });
-  const view = await getImageGenSettingsView(db, env());
+  const view = await getImageGenSettingsView(db, env(), USER_A);
   assert.equal(view.provider, "seedream");
-  assert.equal(view.providers.seedream.keySource, "db");
+  assert.equal(view.providers.seedream.keySource, "user");
   assert.equal(view.providers.seedream.apiKeyConfigured, true);
   assert.equal(view.providers.seedream.keyLocked, false);
   assert.match(view.providers.seedream.apiKeyMasked, /^ark\*{4}/);
@@ -167,21 +179,34 @@ test("settings：主密钥缺失时 DB 密钥标记 keyLocked", async () => {
   const key = (await getEncryptionKey(env()))!;
   const cipher = await encryptSecret(key, "ark-secret-1");
   const db = settingsDb({ "imagegen.ARK_API_KEY": cipher });
-  const view = await getImageGenSettingsView(db, {});
-  assert.equal(view.providers.seedream.keySource, "db");
+  const view = await getImageGenSettingsView(db, {}, USER_A);
+  assert.equal(view.providers.seedream.keySource, "user");
   assert.equal(view.providers.seedream.keyLocked, true);
   assert.equal(view.providers.seedream.apiKeyMasked, "");
 });
 
-test("settings：环境变量密钥显示 env 来源", async () => {
+test("settings：平台环境变量不会作为用户图片生成配置", async () => {
   const db = settingsDb();
   const view = await getImageGenSettingsView(db, {
     OPENAI_API_KEY: "sk-openai-1",
     OPENAI_IMAGE_MODEL: "gpt-image-1",
-  });
-  assert.equal(view.providers.openai.keySource, "env");
-  assert.equal(view.providers.openai.apiKeyConfigured, true);
-  assert.match(view.providers.openai.apiKeyMasked, /^sk-\*\*\*\*/);
+  } as unknown as ReturnType<typeof env>, USER_A);
+  assert.equal(view.providers.openai.keySource, "none");
+  assert.equal(view.providers.openai.apiKeyConfigured, false);
+  assert.equal(view.providers.openai.model, "");
+});
+
+test("settings：不同用户的生成配置彼此隔离", async () => {
+  const db = settingsDb();
+  await saveImageGenSettings(db, USER_A, {
+    provider: "openai",
+    providers: { openai: { apiKey: "sk-user-a" } },
+  } as ImageGenSettingsInput, env());
+  const own = await getImageGenSettingsView(db, env(), USER_A);
+  const other = await getImageGenSettingsView(db, env(), USER_B);
+  assert.equal(own.providers.openai.apiKeyConfigured, true);
+  assert.equal(other.providers.openai.apiKeyConfigured, false);
+  assert.equal(other.provider, "");
 });
 
 // ---------- resolveImageGenProvider ----------
@@ -195,30 +220,25 @@ test("resolveImageGenProvider：DB 配置优先（含密钥解密）", async () 
     "imagegen.SEEDREAM_BASE_URL": "https://ark.example.com/api/v3",
     "imagegen.ARK_API_KEY": cipher,
   });
-  const { adapter, config } = await resolveImageGenProvider({ DB: db, ...env() });
+  const { adapter, config } = await resolveImageGenProvider({ DB: db, ...env() }, USER_A);
   assert.equal(adapter.name, "seedream");
   assert.equal(config.apiKey, "ark-secret-1");
   assert.equal(config.model, "doubao-seedream-4-0");
   assert.equal(config.baseUrl, "https://ark.example.com/api/v3");
 });
 
-test("resolveImageGenProvider：无 DB 配置时回退环境变量", async () => {
+test("resolveImageGenProvider：无个人配置时不回退平台环境变量", async () => {
   const db = settingsDb();
-  const { adapter, config } = await resolveImageGenProvider({
-    DB: db,
-    IMAGE_PROVIDER: "openai",
-    OPENAI_API_KEY: "sk-env-1",
-    OPENAI_IMAGE_MODEL: "gpt-image-1",
-    ...env(),
-  });
-  assert.equal(adapter.name, "openai");
-  assert.equal(config.apiKey, "sk-env-1");
+  await assert.rejects(
+    () => resolveImageGenProvider({ DB: db, ...env() }, USER_A),
+    (error: unknown) => error instanceof ImageGenError && error.code === "unconfigured",
+  );
 });
 
 test("resolveImageGenProvider：未配置厂商抛 unconfigured", async () => {
   const db = settingsDb();
   await assert.rejects(
-    () => resolveImageGenProvider({ DB: db, ...env() }),
+    () => resolveImageGenProvider({ DB: db, ...env() }, USER_A),
     (error: unknown) => error instanceof ImageGenError && error.code === "unconfigured",
   );
 });
@@ -232,7 +252,7 @@ test("resolveImageGenProvider：DB 密钥缺少主密钥时抛 unconfigured", as
     "imagegen.ARK_API_KEY": cipher,
   });
   await assert.rejects(
-    () => resolveImageGenProvider({ DB: db }),
+    () => resolveImageGenProvider({ DB: db }, USER_A),
     (error: unknown) =>
       error instanceof ImageGenError &&
       error.code === "unconfigured" &&
@@ -278,12 +298,14 @@ test("normalizeBaseUrl：正确前缀保持不变、容忍尾斜杠", () => {
 });
 
 test("normalizeBaseUrl：resolveImageGenProvider 返回归一化后的 baseUrl", async () => {
+  const key = (await getEncryptionKey(env()))!;
+  const cipher = await encryptSecret(key, "ark-secret-2");
   const db = settingsDb({
     "imagegen.IMAGE_PROVIDER": "seedream",
     "imagegen.SEEDREAM_MODEL": "model-x",
     "imagegen.SEEDREAM_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+    "imagegen.ARK_API_KEY": cipher,
   });
-  // DB 无密钥密文 → 走环境变量兜底
-  const { config } = await resolveImageGenProvider({ DB: db, ARK_API_KEY: "ark-secret-2", ...env() });
+  const { config } = await resolveImageGenProvider({ DB: db, ...env() }, USER_A);
   assert.equal(config.baseUrl, "https://ark.cn-beijing.volces.com/api/v3");
 });

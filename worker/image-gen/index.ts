@@ -1,4 +1,4 @@
-/** 图片生成注册表：按 IMAGE_PROVIDER（settings 表优先、环境变量兜底）选择厂商。 */
+/** 图片生成注册表：只读取当前用户保存的厂商与 API 配置。 */
 import type { D1Database } from "../auth";
 import { ImageGenError, type ImageGenAdapter, type ImageGenProviderName, type ProviderConfig } from "./types";
 import { openaiAdapter } from "./openai";
@@ -14,22 +14,8 @@ export const ADAPTERS: Record<ImageGenProviderName, ImageGenAdapter> = {
   qwen: qwenAdapter,
 };
 
-/** 图片生成相关环境变量（密钥只进 .dev.vars / Cloudflare Secret；页面保存的密钥加密后存 settings 表）。 */
+/** 平台只提供用户 API Key 的数据库加密主密钥，不提供图片生成 API。 */
 export interface ImageGenEnv {
-  IMAGE_PROVIDER?: string;
-  // Seedream（火山方舟）
-  ARK_API_KEY?: string;
-  SEEDREAM_MODEL?: string;
-  SEEDREAM_BASE_URL?: string;
-  // OpenAI
-  OPENAI_API_KEY?: string;
-  OPENAI_IMAGE_MODEL?: string;
-  OPENAI_BASE_URL?: string;
-  // Qwen（阿里云百炼）
-  DASHSCOPE_API_KEY?: string;
-  QWEN_IMAGE_MODEL?: string;
-  QWEN_IMAGE_BASE_URL?: string;
-  // 密钥加密主密钥（base64 32 字节）
   SETTINGS_ENCRYPTION_KEY?: string;
 }
 
@@ -53,13 +39,13 @@ export function normalizeBaseUrl(baseUrl: string, provider: ImageGenProviderName
 
 export async function resolveImageGenProvider(
   env: ImageGenEnv & { DB: D1Database },
+  userId: string,
   providerName?: string,
 ): Promise<{ adapter: ImageGenAdapter; config: ProviderConfig }> {
-  const map = await loadSettingsMap(env.DB);
+  const map = await loadSettingsMap(env.DB, userId);
   const get = (name: string): string => {
     const dbValue = map[`${KEY_PREFIX}${name}`];
-    if (dbValue !== undefined && dbValue !== "") return dbValue;
-    return String((env as unknown as Record<string, unknown>)[name] ?? "").trim();
+    return dbValue !== undefined ? dbValue.trim() : "";
   };
 
   const provider = (providerName || get("IMAGE_PROVIDER")).toLowerCase() as ImageGenProviderName;

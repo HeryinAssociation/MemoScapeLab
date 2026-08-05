@@ -27,11 +27,14 @@ function verticalSpan(scene: ImmersiveScene) {
 export function ViewerApp({
   projectId,
   embedded = false,
+  allowFullscreen = false,
 }: {
   projectId?: string;
   embedded?: boolean;
+  allowFullscreen?: boolean;
 }) {
   const viewerRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLElement>(null);
   const renderHandleRef = useRef<RenderHandle | null>(null);
   const [project, setProject] = useState<PanoramaProject | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
@@ -106,6 +109,16 @@ export function ViewerApp({
     setReloadKey((current) => current + 1);
   };
 
+  const openFullscreen = async () => {
+    const frame = frameRef.current;
+    if (!frame || !document.fullscreenEnabled) return;
+    try {
+      await frame.requestFullscreen();
+    } catch {
+      setMessage("浏览器未允许进入全屏模式");
+    }
+  };
+
   return (
     <main className={`project-viewer ${embedded ? "is-embedded" : ""}`}>
       {!embedded && <header className="project-viewer-bar">
@@ -124,8 +137,19 @@ export function ViewerApp({
         </div>
       </header>}
 
-      <section className="project-viewer-frame">
+      <section ref={frameRef} className="project-viewer-frame">
         <div ref={viewerRef} className="project-viewer-canvas" />
+
+        {allowFullscreen && (
+          <button
+            type="button"
+            className="project-viewer-fullscreen"
+            onClick={() => void openFullscreen()}
+            aria-label="全屏浏览照片"
+          >
+            全屏浏览
+          </button>
+        )}
 
         {!embedded && <div className="project-viewer-topline">
           <span>ARCHIVE / {project?.id ?? "SYNCING"}</span>

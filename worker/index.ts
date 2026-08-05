@@ -3,6 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import {
   CREATE_ASSETS_OWNER_INDEX,
+  CREATE_ASSETS_PARENT_INDEX,
   CREATE_ASSETS_PROJECT_INDEX,
   CREATE_ASSETS_TABLE,
   IMAGE_GEN_SCHEMA_STATEMENTS,
@@ -69,7 +70,9 @@ interface ProjectRow {
   notes: string;
   mode: SceneMode;
   original_image_url: string;
+  original_thumbnail_url: string;
   panorama_image_url: string;
+  panorama_thumbnail_url: string;
   scene_json: string;
   workflow_step: number;
   publication_status: "draft" | "published";
@@ -81,6 +84,7 @@ interface ProjectRow {
 interface AssetRow {
   id: string;
   project_id: string | null;
+  parent_asset_id: string | null;
   owner_user_id: string;
   kind: LightCosAssetKind;
   storage_provider: "lightcos";
@@ -106,7 +110,9 @@ function projectFromRow(row: ProjectRow) {
     notes: row.notes,
     mode: row.mode,
     originalImageUrl: row.original_image_url,
+    originalThumbnailUrl: row.original_thumbnail_url,
     panoramaImageUrl: row.panorama_image_url,
+    panoramaThumbnailUrl: row.panorama_thumbnail_url,
     scene: JSON.parse(row.scene_json) as ImmersiveScene,
     workflowStep: row.workflow_step,
     publicationStatus: row.publication_status,
@@ -131,6 +137,17 @@ async function ensureDatabase(env: Env, url: URL) {
   if (!columns.results.some((column) => column.name === "owner_user_id")) {
     await db.prepare("ALTER TABLE projects ADD COLUMN owner_user_id TEXT REFERENCES users(id)").run();
   }
+  if (!columns.results.some((column) => column.name === "original_thumbnail_url")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN original_thumbnail_url TEXT NOT NULL DEFAULT ''").run();
+  }
+  if (!columns.results.some((column) => column.name === "panorama_thumbnail_url")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN panorama_thumbnail_url TEXT NOT NULL DEFAULT ''").run();
+  }
+  const assetColumns = await db.prepare("PRAGMA table_info(assets)").all<{ name: string }>();
+  if (!assetColumns.results.some((column) => column.name === "parent_asset_id")) {
+    await db.prepare("ALTER TABLE assets ADD COLUMN parent_asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE").run();
+  }
+  await db.prepare(CREATE_ASSETS_PARENT_INDEX).run();
   await db.prepare(CREATE_PROJECTS_OWNER_INDEX).run();
   const superadminId = await ensureSuperadmin(env);
 
@@ -142,9 +159,10 @@ async function ensureDatabase(env: Env, url: URL) {
         .prepare(`
           INSERT OR IGNORE INTO projects (
             id, title, capture_time, location, notes, mode,
-            original_image_url, panorama_image_url, scene_json,
+            original_image_url, original_thumbnail_url,
+            panorama_image_url, panorama_thumbnail_url, scene_json,
             workflow_step, publication_status, owner_user_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .bind(
           project.id,
@@ -154,7 +172,9 @@ async function ensureDatabase(env: Env, url: URL) {
           project.notes,
           project.mode,
           project.originalImageUrl,
+          project.originalThumbnailUrl || project.originalImageUrl,
           project.panoramaImageUrl,
+          project.panoramaThumbnailUrl || project.panoramaImageUrl,
           JSON.stringify(project.scene),
           3,
           "draft",
@@ -179,7 +199,8 @@ async function ensureDatabase(env: Env, url: URL) {
         .prepare(`
           UPDATE projects SET
             title = ?, capture_time = ?, location = ?, notes = ?, mode = ?,
-            original_image_url = ?, panorama_image_url = ?, scene_json = ?,
+            original_image_url = ?, original_thumbnail_url = ?,
+            panorama_image_url = ?, panorama_thumbnail_url = ?, scene_json = ?,
             workflow_step = ?, updated_at = ?
           WHERE id = ? AND original_image_url = panorama_image_url
         `)
@@ -190,7 +211,9 @@ async function ensureDatabase(env: Env, url: URL) {
           project.notes,
           project.mode,
           project.originalImageUrl,
+          project.originalThumbnailUrl || project.originalImageUrl,
           project.panoramaImageUrl,
+          project.panoramaThumbnailUrl || project.panoramaImageUrl,
           JSON.stringify(project.scene),
           3,
           now,
@@ -217,7 +240,9 @@ function normalizedProjectInput(body: Record<string, unknown>, id?: string) {
     notes: String(body.notes ?? ""),
     mode,
     originalImageUrl: String(body.originalImageUrl ?? ""),
+    originalThumbnailUrl: String(body.originalThumbnailUrl ?? ""),
     panoramaImageUrl: String(body.panoramaImageUrl ?? ""),
+    panoramaThumbnailUrl: String(body.panoramaThumbnailUrl ?? ""),
     workflowStep: Math.min(4, Math.max(1, Number(body.workflowStep ?? 1))),
     publicationStatus:
       body.publicationStatus === "published" ? "published" : "draft",
@@ -227,6 +252,53 @@ function normalizedProjectInput(body: Record<string, unknown>, id?: string) {
 
 function assetIdFromUrl(value: string) {
   return value.match(/^\/api\/assets\/([0-9a-f-]{36})$/i)?.[1] ?? null;
+}
+
+function imageBytesToDataUrl(bytes: ArrayBuffer, contentType: string) {
+  const view = new Uint8Array(bytes);
+  const chunks: string[] = [];
+  for (let offset = 0; offset < view.length; offset += 0x8000) {
+    chunks.push(String.fromCharCode(...view.subarray(offset, offset + 0x8000)));
+  }
+  return `data:${contentType.toLowerCase()};base64,${btoa(chunks.join(""))}`;
+}
+
+/** 读取项目私有参考图，供用户自己配置的图片生成 API 使用。 */
+async function generationReferenceToDataUrl(
+  env: Env,
+  pathOrKey: string,
+  projectId: string,
+) {
+  const assetId = assetIdFromUrl(pathOrKey);
+  if (!assetId) return assetToDataUrl(env.MEDIA, pathOrKey);
+
+  const asset = await env.DB.prepare(`
+    SELECT * FROM assets
+    WHERE id = ? AND project_id = ? AND status = 'ready'
+  `).bind(assetId, projectId).first<AssetRow>();
+  if (!asset) {
+    throw new ImageGenError("upstream_error", "项目参考图不存在或尚未完成上传。", false);
+  }
+  const config = lightCosConfigFromEnv(env);
+  if (!config) {
+    throw new ImageGenError("unconfigured", "LightCOS 尚未配置完整，无法读取项目参考图。", false);
+  }
+  const signedUrl = await createLightCosPresignedUrl({
+    config,
+    method: "GET",
+    bucket: asset.bucket,
+    key: asset.object_key,
+    expiresInSeconds: 5 * 60,
+  });
+  const response = await fetch(signedUrl, { method: "GET" });
+  if (!response.ok) {
+    throw new ImageGenError(
+      "upstream_error",
+      `LightCOS 参考图读取失败（HTTP ${response.status}）。`,
+      response.status >= 500,
+    );
+  }
+  return imageBytesToDataUrl(await response.arrayBuffer(), asset.content_type || "image/png");
 }
 
 async function linkProjectAssets(
@@ -276,9 +348,10 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
     await env.DB.prepare(`
       INSERT INTO projects (
         id, title, capture_time, location, notes, mode,
-        original_image_url, panorama_image_url, scene_json,
+        original_image_url, original_thumbnail_url,
+        panorama_image_url, panorama_thumbnail_url, scene_json,
         workflow_step, publication_status, owner_user_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
       .bind(
         project.id,
@@ -288,7 +361,9 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
         project.notes,
         project.mode,
         project.originalImageUrl,
+        project.originalThumbnailUrl,
         project.panoramaImageUrl,
+        project.panoramaThumbnailUrl,
         JSON.stringify(project.scene),
         project.workflowStep,
         project.publicationStatus,
@@ -301,7 +376,7 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       env.DB,
       auth.user.id,
       project.id,
-      [project.originalImageUrl, project.panoramaImageUrl],
+      [project.originalImageUrl, project.originalThumbnailUrl, project.panoramaImageUrl, project.panoramaThumbnailUrl],
       project.publicationStatus,
     );
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id = ?")
@@ -344,7 +419,8 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
     await env.DB.prepare(`
       UPDATE projects SET
         title = ?, capture_time = ?, location = ?, notes = ?, mode = ?,
-        original_image_url = ?, panorama_image_url = ?, scene_json = ?,
+        original_image_url = ?, original_thumbnail_url = ?,
+        panorama_image_url = ?, panorama_thumbnail_url = ?, scene_json = ?,
         workflow_step = ?, publication_status = ?, updated_at = ?
       WHERE id = ?
     `)
@@ -355,7 +431,9 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
         project.notes,
         project.mode,
         project.originalImageUrl,
+        project.originalThumbnailUrl,
         project.panoramaImageUrl,
+        project.panoramaThumbnailUrl,
         JSON.stringify(project.scene),
         project.workflowStep,
         project.publicationStatus,
@@ -367,7 +445,7 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       env.DB,
       auth.user.id,
       id,
-      [project.originalImageUrl, project.panoramaImageUrl],
+      [project.originalImageUrl, project.originalThumbnailUrl, project.panoramaImageUrl, project.panoramaThumbnailUrl],
       project.publicationStatus,
     );
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id = ?")
@@ -409,12 +487,24 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       return json({ error: message }, { status: message.includes("不能超过") ? 413 : 400 });
     }
 
-    const projectId = String(body?.projectId ?? "").trim() || null;
+    let projectId = String(body?.projectId ?? "").trim() || null;
     if (projectId) {
       const project = await env.DB.prepare(
         "SELECT id FROM projects WHERE id = ? AND owner_user_id = ?",
       ).bind(projectId, auth.user.id).first<{ id: string }>();
       if (!project) return json({ error: "项目不存在或无权上传素材。" }, { status: 404 });
+    }
+
+    let parentAssetId: string | null = null;
+    if (kind === "thumbnail") {
+      parentAssetId = String(body?.parentAssetId ?? "").trim() || null;
+      if (!parentAssetId) return json({ error: "缩略图缺少原始资源关联。" }, { status: 400 });
+      const parent = await env.DB.prepare(`
+        SELECT id, project_id FROM assets
+        WHERE id = ? AND owner_user_id = ? AND status = 'ready' AND kind IN ('original', 'panorama')
+      `).bind(parentAssetId, auth.user.id).first<{ id: string; project_id: string | null }>();
+      if (!parent) return json({ error: "缩略图对应的原始资源不存在。" }, { status: 404 });
+      if (!projectId) projectId = parent.project_id;
     }
 
     const assetId = crypto.randomUUID();
@@ -425,13 +515,14 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
     const now = new Date().toISOString();
     await env.DB.prepare(`
       INSERT INTO assets (
-        id, project_id, owner_user_id, kind, storage_provider,
+        id, project_id, parent_asset_id, owner_user_id, kind, storage_provider,
         bucket, region, object_key, original_filename, content_type,
         byte_size, visibility, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'lightcos', ?, ?, ?, ?, ?, ?, 'private', 'pending', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 'lightcos', ?, ?, ?, ?, ?, ?, 'private', 'pending', ?, ?)
     `).bind(
       assetId,
       projectId,
+      parentAssetId,
       auth.user.id,
       kind,
       bucket,
@@ -581,7 +672,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
   return json({ error: "接口不存在。" }, { status: 404 });
 }
 
-/** 图片生成设置：GET 返回掩码视图，PUT 保存（superadmin + CSRF）。 */
+/** 图片生成设置：每个登录用户只能读取和保存自己的配置。 */
 async function handleImageGenSettingsApi(
   request: Request,
   env: Env,
@@ -595,12 +686,10 @@ async function handleImageGenSettingsApi(
   if (auth.user.must_change_password) {
     return json({ error: "请先在用户设置中修改临时密码。" }, { status: 403 });
   }
-  if (auth.user.role !== "superadmin") {
-    return json({ error: "没有管理员权限。" }, { status: 403 });
-  }
+  if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
 
   if (request.method === "GET") {
-    const view = await getImageGenSettingsView(env.DB, env);
+    const view = await getImageGenSettingsView(env.DB, env, auth.user.id);
     return json(view);
   }
 
@@ -691,7 +780,11 @@ async function handleGenerateApi(
         : undefined;
 
     // 提前解析厂商，未配置时立即报错而不是后台失败
-    const provider = await resolveImageGenProvider(env, body?.provider as string | undefined);
+    const provider = await resolveImageGenProvider(
+      env,
+      auth.user.id,
+      body?.provider as string | undefined,
+    );
     const taskId = crypto.randomUUID();
     const now = new Date().toISOString();
     await env.DB
@@ -773,11 +866,14 @@ async function runImageGenTask(env: Env, taskId: string) {
       .bind(now(), taskId)
       .run();
 
-    const provider = await resolveImageGenProvider(env);
-    // 参考图 = R2 资产转 Base64 data URL（厂商无法访问本地 localhost /api/assets 地址）
+    if (!task.owner_user_id) {
+      throw new ImageGenError("unconfigured", "生成任务缺少用户归属，无法读取个人 API 设置。");
+    }
+    const provider = await resolveImageGenProvider(env, task.owner_user_id, task.provider);
+    // 私有参考图转 Base64，仅发送给该用户自己配置并选择的生成厂商。
     const referenceImages: string[] = [];
     for (const path of JSON.parse(task.reference_image_keys) as string[]) {
-      referenceImages.push(await assetToDataUrl(env.MEDIA, path));
+      referenceImages.push(await generationReferenceToDataUrl(env, path, task.project_id));
     }
     const result = await runImageGen({
       adapter: provider.adapter,

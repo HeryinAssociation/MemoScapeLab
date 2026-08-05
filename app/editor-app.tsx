@@ -20,10 +20,7 @@ import {
 } from "@/src/core/projection-types";
 import { renderScene, type RenderHandle } from "@/src/core/render-router";
 import { validateScene } from "@/src/core/scene-validator";
-import {
-  downloadSceneConfig,
-  serializeScene,
-} from "@/src/editor/config-exporter";
+import { serializeScene } from "@/src/editor/config-exporter";
 import { EDITOR_PRESETS } from "@/src/editor/presets";
 import type { AdaptiveViewState } from "@/src/adaptive/adaptive-renderer";
 
@@ -82,6 +79,7 @@ interface EditorAppProps {
   initialScene?: ImmersiveScene;
   embedded?: boolean;
   originalImageUrl?: string;
+  originalImageThumbnailUrl?: string;
   originalImageTitle?: string;
   onSceneChange?: (scene: ImmersiveScene) => void;
   onSave?: (scene: ImmersiveScene) => Promise<void> | void;
@@ -190,6 +188,7 @@ export function EditorApp({
   initialScene = INITIAL_SCENE,
   embedded = false,
   originalImageUrl = "",
+  originalImageThumbnailUrl = "",
   originalImageTitle = "历史照片原照",
   onSceneChange,
   onSave,
@@ -548,16 +547,12 @@ export function EditorApp({
             <i />
             {notice}
           </span>
-          <a href="/viewer">浏览成片</a>
-          <button type="button" onClick={() => void saveDraft()}>
-            {onSave ? "保存项目" : "保存草稿"}
-          </button>
           <button
             className="primary-action"
             type="button"
-            onClick={() => downloadSceneConfig(scene, exportSource)}
+            onClick={() => void saveDraft()}
           >
-            导出 JSON
+            {onSave ? "保存项目" : "保存草稿"}
           </button>
         </div>
       </header>
@@ -584,7 +579,7 @@ export function EditorApp({
                 >
                   {/* User-uploaded and local archive images intentionally bypass optimization. */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={originalImageUrl} alt={originalImageTitle} />
+                  <img src={originalImageThumbnailUrl || originalImageUrl} alt={originalImageTitle} />
                   <span>点击放大浏览</span>
                 </button>
               ) : (
@@ -1045,9 +1040,9 @@ export function EditorApp({
             <button
               type="button"
               className="primary-action"
-              onClick={() => downloadSceneConfig(scene, exportSource)}
+              onClick={() => void saveDraft()}
             >
-              导出 JSON
+              {onSave ? "保存项目" : "保存草稿"}
             </button>
           </div>
         </aside>

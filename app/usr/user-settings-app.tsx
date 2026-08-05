@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { authenticatedFetch, getCurrentAuth, setCurrentAuth, type CurrentUser } from "@/src/auth/client";
+import { createWebpThumbnail } from "@/src/images/client-thumbnail";
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" }).format(new Date(value));
@@ -46,8 +47,16 @@ export function UserSettingsApp() {
   const uploadAvatar = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
     setBusy("avatar"); setError(""); setMessage("");
-    const form = new FormData(); form.set("file", file);
     try {
+      const thumbnail = await createWebpThumbnail(file, file.name, {
+        maxWidth: 384,
+        maxHeight: 384,
+        quality: 0.82,
+        square: true,
+      });
+      const form = new FormData();
+      form.set("file", file);
+      form.set("thumbnail", thumbnail);
       const response = await authenticatedFetch("/api/users/me/avatar", { method: "POST", body: form });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "头像上传失败");

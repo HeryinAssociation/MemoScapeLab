@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS projects (
   notes TEXT NOT NULL DEFAULT '',
   mode TEXT NOT NULL DEFAULT 'curvedPhoto',
   original_image_url TEXT NOT NULL DEFAULT '',
+  original_thumbnail_url TEXT NOT NULL DEFAULT '',
   panorama_image_url TEXT NOT NULL DEFAULT '',
+  panorama_thumbnail_url TEXT NOT NULL DEFAULT '',
   scene_json TEXT NOT NULL,
   workflow_step INTEGER NOT NULL DEFAULT 1,
   publication_status TEXT NOT NULL DEFAULT 'draft',
@@ -85,6 +87,7 @@ export const CREATE_ASSETS_TABLE = `
 CREATE TABLE IF NOT EXISTS assets (
   id TEXT PRIMARY KEY,
   project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  parent_asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
   owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   storage_provider TEXT NOT NULL DEFAULT 'lightcos',
@@ -111,6 +114,11 @@ ON assets (project_id, kind, updated_at DESC)
 export const CREATE_ASSETS_OWNER_INDEX = `
 CREATE INDEX IF NOT EXISTS assets_owner_updated_idx
 ON assets (owner_user_id, updated_at DESC)
+`;
+
+export const CREATE_ASSETS_PARENT_INDEX = `
+CREATE INDEX IF NOT EXISTS assets_parent_idx
+ON assets (parent_asset_id)
 `;
 
 export const CREATE_SESSIONS_USER_INDEX = `
@@ -151,8 +159,28 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_by TEXT NOT NULL
 )`;
 
+export const CREATE_USER_IMAGEGEN_SETTINGS_TABLE = `
+CREATE TABLE IF NOT EXISTS user_imagegen_settings (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, key)
+) WITHOUT ROWID
+`;
+
+export const MIGRATE_LEGACY_IMAGEGEN_SETTINGS = `
+INSERT OR IGNORE INTO user_imagegen_settings (user_id, key, value, updated_at)
+SELECT settings.updated_by, settings.key, settings.value, settings.updated_at
+FROM settings
+INNER JOIN users ON users.id = settings.updated_by
+WHERE settings.key LIKE 'imagegen.%'
+`;
+
 export const SETTINGS_SCHEMA_STATEMENTS = [
   CREATE_SETTINGS_TABLE,
+  CREATE_USER_IMAGEGEN_SETTINGS_TABLE,
+  MIGRATE_LEGACY_IMAGEGEN_SETTINGS,
 ] as const;
 
 export const IMAGE_GEN_SCHEMA_STATEMENTS = [
@@ -177,4 +205,5 @@ export const PROJECT_SCHEMA_STATEMENTS = [
   CREATE_ASSETS_TABLE,
   CREATE_ASSETS_PROJECT_INDEX,
   CREATE_ASSETS_OWNER_INDEX,
+  CREATE_ASSETS_PARENT_INDEX,
 ] as const;

@@ -10,7 +10,9 @@ export interface PanoramaProject {
   notes: string;
   mode: SceneMode;
   originalImageUrl: string;
+  originalThumbnailUrl: string;
   panoramaImageUrl: string;
+  panoramaThumbnailUrl: string;
   scene: ImmersiveScene;
   workflowStep: number;
   publicationStatus: PublicationStatus;

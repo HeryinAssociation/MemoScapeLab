@@ -26,9 +26,11 @@ AI 历史照片自适应沉浸式渲染器与可视化调参工作台。项目�
 - `/work` 上传、生成预留、投影调参、发布预留四步工作流；
 - 项目卡片可重新进入工作台并加载已保存的全部参数。
 - LighthouseCOS 双桶图床、同源后端代理上传、上传进度、服务端对象校验与私有资源访问链接；
+- 历史原图、AIGC / 全景图与头像在浏览器端生成 WebP 缩略图，并与原文件成对上传、关联存储；
 - D1 用户、服务端 Session、HttpOnly Cookie 与项目所有权隔离；
 - 注册、登录、登出、头像、用户设置和安全改密；
 - 30 分钟邮箱验证码、腾讯云 SES 真实邮件发送与 Resend 兼容接口；
+- 每位用户独立的大模型生成设置；平台不提供共享 AI API，用户 API Key 加密保存并只用于本人任务；
 - 超级管理员用户目录、组合检索、封禁、验证状态调整、密码重置和账号彻底删除。
 
 ## 本地运行
@@ -56,6 +58,8 @@ Cloudflare Secret，不能写入源码或提交到 Git。
 
 本项目使用的是轻量对象存储（Lighthouse 版）：浏览器只访问 MemoScapeLab 同源接口，由后端使用 COS 对象级 API 上传和读取文件，因此不依赖存储桶 CORS。历史原图限制为 10MB，全景图限制为 50MB；上传仅接受 JPG/JPEG、PNG、WebP。未来正式域名确定后可写入 `TENCENT_LIGHTCOS_PUBLIC_DOMAIN`，但当前公开访问仍由 MemoScapeLab 的稳定资源 URL 控制。
 
+上传历史原图或全景图时，浏览器会先生成最长边不超过 `1600 × 900`、质量 `0.82` 的 WebP 缩略图；头像生成 `384 × 384` 居中裁切 WebP 缩略图。随后原文件与缩略图分别上传，D1 通过 `assets.parent_asset_id` 保留派生关系。项目卡片、工作流上传区、生成页和头像接口默认读取缩略图；投影调参 Viewer、发布 Viewer，以及调参台中点击放大的历史原图仍读取原文件。已有项目在没有缩略图字段时会回退显示原文件，重新上传后即可补齐缩略图。
+
 ## 构建与测试
 
 ```bash
@@ -67,7 +71,7 @@ node --import tsx --test tests/scene-validator.test.ts tests/rendered-html.test.
 
 ## 场景配置
 
-根路径会根据 Session 进入 `/login` 或 `/proj`；`/work` 为项目工作台，`/about` 为项目介绍，`/usr` 为用户设置，`/usradmin` 为超级管理员用户目录，`/viewer` 为配置后的成片浏览页面。示例配置位于 `public/configs/`。弧形照片配置结构为：
+根路径会根据 Session 进入 `/login` 或 `/proj`；`/work` 为项目工作台，并在第四环节内提供最终浏览与全屏预览；`/about` 为项目介绍，`/usr` 为用户设置，`/usradmin` 为超级管理员用户目录。示例配置位于 `public/configs/`。弧形照片配置结构为：
 
 ```json
 {

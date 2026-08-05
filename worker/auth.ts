@@ -707,12 +707,17 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
     if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
     const form = await request.formData();
     const file = form.get("file");
+    const thumbnail = form.get("thumbnail");
     if (!(file instanceof File) || !["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
       return json({ error: "头像仅支持 JPG、PNG 或 WebP 图片。" }, { status: 400 });
+    }
+    if (!(thumbnail instanceof File) || thumbnail.type !== "image/webp") {
+      return json({ error: "头像缺少浏览器生成的 WebP 缩略图。" }, { status: 400 });
     }
     let extension = "";
     try {
       extension = validateLightCosUpload("avatar", file.type, file.size).extension;
+      validateLightCosUpload("thumbnail", thumbnail.type, thumbnail.size);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "头像参数无效。";
       return json({ error: message }, { status: message.includes("不能超过") ? 413 : 400 });
@@ -726,48 +731,59 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
     }
 
     const assetId = crypto.randomUUID();
+    const thumbnailAssetId = crypto.randomUUID();
     const bucket = lightCosBucketForKind(config, "avatar");
     const objectKey = `users/${auth.user.id}/avatars/${assetId}${extension}`;
+    const thumbnailObjectKey = `users/${auth.user.id}/avatars/thumbnail/${thumbnailAssetId}.webp`;
     const now = new Date().toISOString();
-    await env.DB.prepare(`
-      INSERT INTO assets (
-        id, project_id, owner_user_id, kind, storage_provider,
-        bucket, region, object_key, original_filename, content_type,
-        byte_size, visibility, status, created_at, updated_at
-      ) VALUES (?, NULL, ?, 'avatar', 'lightcos', ?, ?, ?, ?, ?, ?, 'published', 'pending', ?, ?)
-    `).bind(
-      assetId,
-      auth.user.id,
-      bucket,
-      config.region,
-      objectKey,
-      file.name.trim().slice(0, 240) || `avatar${extension}`,
-      file.type,
-      file.size,
-      now,
-      now,
-    ).run();
+    await env.DB.batch([
+      env.DB.prepare(`
+        INSERT INTO assets (
+          id, project_id, parent_asset_id, owner_user_id, kind, storage_provider,
+          bucket, region, object_key, original_filename, content_type,
+          byte_size, visibility, status, created_at, updated_at
+        ) VALUES (?, NULL, NULL, ?, 'avatar', 'lightcos', ?, ?, ?, ?, ?, ?, 'published', 'pending', ?, ?)
+      `).bind(
+        assetId, auth.user.id, bucket, config.region, objectKey,
+        file.name.trim().slice(0, 240) || `avatar${extension}`,
+        file.type, file.size, now, now,
+      ),
+      env.DB.prepare(`
+        INSERT INTO assets (
+          id, project_id, parent_asset_id, owner_user_id, kind, storage_provider,
+          bucket, region, object_key, original_filename, content_type,
+          byte_size, visibility, status, created_at, updated_at
+        ) VALUES (?, NULL, ?, ?, 'thumbnail', 'lightcos', ?, ?, ?, ?, 'image/webp', ?, 'published', 'pending', ?, ?)
+      `).bind(
+        thumbnailAssetId, assetId, auth.user.id, bucket, config.region, thumbnailObjectKey,
+        thumbnail.name.trim().slice(0, 240) || "avatar.thumbnail.webp",
+        thumbnail.size, now, now,
+      ),
+    ]);
 
     try {
-      const uploadUrl = await createLightCosPresignedUrl({
-        config,
-        method: "PUT",
-        bucket,
-        key: objectKey,
-        expiresInSeconds: 5 * 60,
-      });
-      const uploadResponse = await fetch(uploadUrl, {
-        method: "PUT",
-        headers: { "content-type": file.type },
-        body: await file.arrayBuffer(),
-      });
-      if (!uploadResponse.ok) {
-        throw new Error(`LighthouseCOS 写入失败（HTTP ${uploadResponse.status}）。`);
-      }
-      const remote = await inspectLightCosObject(config, bucket, objectKey);
+      const uploadObject = async (input: File, key: string) => {
+        const uploadUrl = await createLightCosPresignedUrl({
+          config, method: "PUT", bucket, key, expiresInSeconds: 5 * 60,
+        });
+        const uploadResponse = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: { "content-type": input.type },
+          body: await input.arrayBuffer(),
+        });
+        if (!uploadResponse.ok) {
+          throw new Error(`LighthouseCOS 写入失败（HTTP ${uploadResponse.status}）。`);
+        }
+        return inspectLightCosObject(config, bucket, key);
+      };
+      const remote = await uploadObject(file, objectKey);
+      const thumbnailRemote = await uploadObject(thumbnail, thumbnailObjectKey);
       if (remote.size !== file.size) throw new Error("上传后的头像大小与原文件不一致。");
       if (remote.contentType && remote.contentType !== file.type) {
         throw new Error("上传后的头像类型与原文件不一致。");
+      }
+      if (thumbnailRemote.size !== thumbnail.size || (thumbnailRemote.contentType && thumbnailRemote.contentType !== "image/webp")) {
+        throw new Error("上传后的头像缩略图校验失败。");
       }
 
       const previousAvatar = auth.user.avatar_key;
@@ -775,6 +791,8 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
       await env.DB.batch([
         env.DB.prepare("UPDATE assets SET etag = ?, status = 'ready', updated_at = ? WHERE id = ?")
           .bind(remote.etag, now, assetId),
+        env.DB.prepare("UPDATE assets SET etag = ?, status = 'ready', updated_at = ? WHERE id = ?")
+          .bind(thumbnailRemote.etag, now, thumbnailAssetId),
         env.DB.prepare("UPDATE users SET avatar_key = ?, updated_at = ? WHERE id = ?")
           .bind(avatarReference, now, auth.user.id),
       ]);
@@ -782,24 +800,23 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
       try {
         if (previousAvatar?.startsWith("lightcos:")) {
           const previousId = previousAvatar.slice("lightcos:".length);
-          const previous = await env.DB.prepare(
-            "SELECT bucket, object_key FROM assets WHERE id = ? AND owner_user_id = ?",
-          ).bind(previousId, auth.user.id).first<{ bucket: string; object_key: string }>();
-          if (previous) {
+          const previous = await env.DB.prepare(`
+            SELECT id, bucket, object_key FROM assets
+            WHERE owner_user_id = ? AND (id = ? OR parent_asset_id = ?)
+          `).bind(auth.user.id, previousId, previousId).all<{ id: string; bucket: string; object_key: string }>();
+          for (const previousAsset of previous.results) {
             const deleteUrl = await createLightCosPresignedUrl({
               config,
               method: "DELETE",
-              bucket: previous.bucket,
-              key: previous.object_key,
+              bucket: previousAsset.bucket,
+              key: previousAsset.object_key,
               expiresInSeconds: 5 * 60,
             });
-            const deleted = await fetch(deleteUrl, { method: "DELETE" });
-            if (deleted.ok || deleted.status === 404) {
-              await env.DB.prepare("DELETE FROM assets WHERE id = ? AND owner_user_id = ?")
-                .bind(previousId, auth.user.id)
-                .run();
-            }
+            await fetch(deleteUrl, { method: "DELETE" });
           }
+          await env.DB.prepare("DELETE FROM assets WHERE id = ? AND owner_user_id = ?")
+            .bind(previousId, auth.user.id)
+            .run();
         } else if (previousAvatar) {
           await env.MEDIA.delete(previousAvatar);
         }
@@ -811,9 +828,12 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
         avatarUrl: `/api/users/${encodeURIComponent(auth.user.id)}/avatar?v=${encodeURIComponent(now)}`,
       });
     } catch (caught) {
-      await env.DB.prepare("UPDATE assets SET status = 'failed', updated_at = ? WHERE id = ?")
-        .bind(new Date().toISOString(), assetId)
-        .run();
+      await env.DB.batch([
+        env.DB.prepare("UPDATE assets SET status = 'failed', updated_at = ? WHERE id = ?")
+          .bind(new Date().toISOString(), assetId),
+        env.DB.prepare("UPDATE assets SET status = 'failed', updated_at = ? WHERE id = ?")
+          .bind(new Date().toISOString(), thumbnailAssetId),
+      ]);
       return json({
         error: caught instanceof Error ? caught.message : "LighthouseCOS 头像上传失败。",
       }, { status: 502 });
@@ -831,8 +851,12 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
       const assetId = row.avatar_key.slice("lightcos:".length);
       const asset = await env.DB.prepare(`
         SELECT bucket, object_key, content_type, byte_size, etag, status
-        FROM assets WHERE id = ? AND owner_user_id = ? AND kind = 'avatar'
-      `).bind(assetId, userId).first<{
+        FROM assets
+        WHERE owner_user_id = ? AND status = 'ready'
+          AND (id = ? OR (parent_asset_id = ? AND kind = 'thumbnail'))
+        ORDER BY CASE WHEN kind = 'thumbnail' THEN 0 ELSE 1 END
+        LIMIT 1
+      `).bind(userId, assetId, assetId).first<{
         bucket: string;
         object_key: string;
         content_type: string;

@@ -64,6 +64,7 @@ test("renders the project database as the primary admin application", async () =
   assert.match(html, /影像项目/);
   assert.match(html, /新建照片项目/);
   assert.match(html, /项目档案/);
+  assert.match(html, /生成设置/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
@@ -110,17 +111,12 @@ test("provides the four-step project workbench", async () => {
   assert.match(html, /投影调参/);
   assert.match(html, /发布/);
   assert.match(html, /影像元数据/);
-  assert.match(html, /LIGHTCOS/);
+  assert.match(html, /WEBP 缩略图/);
   assert.match(html, /最大 10 MB/);
   assert.match(html, /最大 50 MB/);
 });
 
-test("keeps the database-backed project viewer available on its own route", async () => {
+test("keeps publish preview inside the workbench instead of a separate viewer route", async () => {
   const response = await render("/viewer?id=bund-clocktower-1930");
-  assert.equal(response.status, 200);
-  const html = await response.text();
-  assert.match(html, /PROJECT VIEWER/);
-  assert.match(html, /正在读取项目/);
-  assert.match(html, /正在同步项目参数/);
-  assert.doesNotMatch(html, /场景档案|scene-rail/);
+  assert.equal(response.status, 404);
 });

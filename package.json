@@ -18,7 +18,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "vinext build",
     "start": "vinext start",
-"test": "pnpm run build && node --import tsx --test tests/auth.test.ts tests/lightcos.test.ts tests/scene-validator.test.ts tests/editor-presets.test.ts tests/adaptive-renderer.test.ts tests/bundled-projects.test.ts tests/image-gen.test.ts tests/imagegen-settings.test.ts tests/imagegen-assets.test.ts tests/rendered-html.test.mjs",
+    "test": "pnpm run build && node --import tsx --test tests/auth.test.ts tests/lightcos.test.ts tests/thumbnail.test.ts tests/scene-validator.test.ts tests/editor-presets.test.ts tests/adaptive-renderer.test.ts tests/bundled-projects.test.ts tests/image-gen.test.ts tests/imagegen-settings.test.ts tests/imagegen-assets.test.ts tests/rendered-html.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern work --ignore-pattern public/vendor"
   },

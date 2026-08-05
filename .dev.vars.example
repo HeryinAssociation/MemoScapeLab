@@ -30,28 +30,10 @@ TENCENT_LIGHTCOS_PUBLIC_DOMAIN=
 # RESEND_API_KEY=re_replace_with_your_api_key
 # EMAIL_FROM=MemoscapeLab <noreply@example.com>
 
-# --- 图片生成（图生图 → 全景），由 IMAGE_PROVIDER 选择厂商 ---
-# 可选值：seedream / openai / qwen
-IMAGE_PROVIDER=seedream
-
-# Seedream（火山方舟，https://console.volcengine.com/ark）
-ARK_API_KEY=replace_with_ark_api_key
-# 模型 ID 带版本号，需到火山方舟控制台获取，如 doubao-seedream-4-0-250828
-SEEDREAM_MODEL=replace_with_seedream_model_id
-# SEEDREAM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-
-# OpenAI（/v1/images/edits，gpt-image-1.x）
-# OPENAI_API_KEY=replace_with_openai_api_key
-# OPENAI_IMAGE_MODEL=gpt-image-1
-# OPENAI_BASE_URL=https://api.openai.com/v1
-
-# Qwen（阿里云百炼，qwen-image-3.0-pro 需先申请邀测）
-# DASHSCOPE_API_KEY=replace_with_dashscope_api_key
-# QWEN_IMAGE_MODEL=qwen-image-3.0-pro
-# QWEN_IMAGE_BASE_URL=https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com
-
-# --- 密钥加密主密钥（图片生成设置页保存 API Key 时必需）---
-# base64 编码的 32 字节随机值，用于 AES-GCM 加密入库的厂商密钥。
+# --- 用户图片生成 API Key 的数据库加密主密钥 ---
+# 平台不提供 IMAGE_PROVIDER 或任何厂商 API Key。每位用户在 /imagegen
+# 填写自己的厂商、模型、地址和 API Key，配置按 user_id 独立保存。
+# 此处只配置 base64 编码的 32 字节平台主密钥，用于 AES-GCM 加密用户密钥。
 # 生成示例：openssl rand -base64 32
-# 未配置时：/imagegen 页面只能保存模型/地址，API Key 只能走上方环境变量。
+# 未配置时，平台会拒绝保存用户 API Key。
 SETTINGS_ENCRYPTION_KEY=replace_with_base64_32_bytes

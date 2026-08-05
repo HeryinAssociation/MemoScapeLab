@@ -10,8 +10,16 @@ const NAV_ITEMS = [
   { key: "home", label: "主页", symbol: "⌂", href: "", disabled: true },
   { key: "projects", label: "项目", symbol: "▦", href: "/proj", disabled: false },
   { key: "work", label: "工作台", symbol: "◎", href: "/work", disabled: false },
-  { key: "about", label: "关于", symbol: "i", href: "/about", disabled: false },
+  { key: "imagegen", label: "生成设置", symbol: "✧", href: "/imagegen", disabled: false },
 ] as const;
+
+const ABOUT_ITEM = {
+  key: "about",
+  label: "关于",
+  symbol: "i",
+  href: "/about",
+  disabled: false,
+} as const;
 
 export function AdminShell({
   active,
@@ -53,10 +61,10 @@ export function AdminShell({
   const navItems = user?.role === "superadmin"
     ? [
         ...NAV_ITEMS,
-        { key: "users", label: "用户", symbol: "♙", href: "/usradmin", disabled: false } as const,
-        { key: "imagegen", label: "生成设置", symbol: "✧", href: "/imagegen", disabled: false } as const,
+        { key: "users", label: "用户管理", symbol: "♙", href: "/usradmin", disabled: false } as const,
+        ABOUT_ITEM,
       ]
-    : NAV_ITEMS;
+    : [...NAV_ITEMS, ABOUT_ITEM];
 
   return (
     <div className="admin-shell">

@@ -8,7 +8,9 @@ interface BundledProjectSeed {
   location: string;
   notes: string;
   originalImageUrl: string;
+  originalThumbnailUrl: string;
   panoramaImageUrl: string;
+  panoramaThumbnailUrl: string;
   mode: SceneMode;
   projection: NonNullable<ImmersiveScene["projection"]>;
   scene: ImmersiveScene;
@@ -126,7 +128,9 @@ export const BUNDLED_PROJECTS: readonly BundledProjectSeed[] =
       location: project.location,
       notes: project.notes,
       originalImageUrl: project.originalImageUrl,
+      originalThumbnailUrl: project.originalImageUrl,
       panoramaImageUrl: project.panoramaImageUrl,
+      panoramaThumbnailUrl: project.panoramaImageUrl,
       mode: project.mode,
       projection: project.projection,
       scene,

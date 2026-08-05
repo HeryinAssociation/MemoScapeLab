@@ -1,4 +1,4 @@
-/** 图片生成设置存取：DB（settings 表）优先、环境变量兜底；密钥 AES-GCM 加密后入库。 */
+/** 用户图片生成设置：按 user_id 隔离，API Key 经 AES-GCM 加密后入库。 */
 import type { D1Database, D1PreparedStatement } from "../auth";
 import {
   decryptSecret,
@@ -12,8 +12,8 @@ import type { ImageGenEnv } from "./index";
 
 export const KEY_PREFIX = "imagegen.";
 
-/** 每个厂商在 settings 表 / 环境变量中的字段名。 */
-export const FIELD_TO_ENV: Record<
+/** 每个厂商在用户设置表中的字段名。 */
+export const PROVIDER_SETTING_FIELDS: Record<
   ImageGenProviderName,
   { model: string; baseUrl: string; apiKey: string }
 > = {
@@ -24,22 +24,21 @@ export const FIELD_TO_ENV: Record<
 
 export const PROVIDER_NAMES: ImageGenProviderName[] = ["seedream", "openai", "qwen"];
 
-export async function loadSettingsMap(db: D1Database): Promise<Record<string, string>> {
+export async function loadSettingsMap(
+  db: D1Database,
+  userId: string,
+): Promise<Record<string, string>> {
   const result = await db
-    .prepare("SELECT key, value FROM settings")
+    .prepare("SELECT key, value FROM user_imagegen_settings WHERE user_id = ?")
+    .bind(userId)
     .all<{ key: string; value: string }>();
   const map: Record<string, string> = {};
   for (const row of result.results) map[row.key] = row.value;
   return map;
 }
 
-function envValue(env: ImageGenEnv, name: string): string {
-  return String((env as unknown as Record<string, unknown>)[name] ?? "").trim();
-}
-
 /**
- * 解析厂商密钥：DB 密文优先（解密），其次环境变量。
- * DB 中有密文但未配置 SETTINGS_ENCRYPTION_KEY 或解密失败时抛出明确错误。
+ * 解密当前用户保存的厂商密钥。平台环境变量不提供任何图片生成 API Key。
  */
 export async function resolveSecretKey(
   env: ImageGenEnv & { DB: D1Database },
@@ -57,7 +56,7 @@ export async function resolveSecretKey(
     }
     return decryptSecret(key, dbValue);
   }
-  return envValue(env, name);
+  return "";
 }
 
 /** GET 视图：每个厂商的模型/地址/掩码密钥与配置来源（不回传明文密钥）。 */
@@ -67,7 +66,7 @@ export interface ProviderSettingsView {
   baseUrl: string;
   apiKeyMasked: string;
   apiKeyConfigured: boolean;
-  keySource: "db" | "env" | "none";
+  keySource: "user" | "none";
   /** 密钥存于 DB 但主密钥缺失/不匹配，无法解密读取。 */
   keyLocked: boolean;
 }
@@ -81,22 +80,23 @@ export interface ImageGenSettingsView {
 export async function getImageGenSettingsView(
   db: D1Database,
   env: ImageGenEnv,
+  userId: string,
 ): Promise<ImageGenSettingsView> {
-  const map = await loadSettingsMap(db);
+  const map = await loadSettingsMap(db, userId);
   const encryptionKey = await getEncryptionKey(env).catch(() => null);
 
   const providers = {} as Record<ImageGenProviderName, ProviderSettingsView>;
   for (const name of PROVIDER_NAMES) {
-    const envNames = FIELD_TO_ENV[name];
-    const model = map[`${KEY_PREFIX}${envNames.model}`] ?? envValue(env, envNames.model);
-    const baseUrl = map[`${KEY_PREFIX}${envNames.baseUrl}`] ?? envValue(env, envNames.baseUrl);
-    const dbSecret = map[`${KEY_PREFIX}${envNames.apiKey}`];
+    const fields = PROVIDER_SETTING_FIELDS[name];
+    const model = map[`${KEY_PREFIX}${fields.model}`] ?? "";
+    const baseUrl = map[`${KEY_PREFIX}${fields.baseUrl}`] ?? "";
+    const dbSecret = map[`${KEY_PREFIX}${fields.apiKey}`];
 
     let apiKeyMasked = "";
     let keySource: ProviderSettingsView["keySource"] = "none";
     let keyLocked = false;
     if (dbSecret !== undefined && dbSecret !== "") {
-      keySource = "db";
+      keySource = "user";
       if (encryptionKey) {
         try {
           apiKeyMasked = maskKey(await decryptSecret(encryptionKey, dbSecret));
@@ -105,12 +105,6 @@ export async function getImageGenSettingsView(
         }
       } else {
         keyLocked = true;
-      }
-    } else {
-      const envSecret = envValue(env, envNames.apiKey);
-      if (envSecret) {
-        keySource = "env";
-        apiKeyMasked = maskKey(envSecret);
       }
     }
 
@@ -125,7 +119,7 @@ export async function getImageGenSettingsView(
     };
   }
 
-  const provider = (map[`${KEY_PREFIX}IMAGE_PROVIDER`] ?? envValue(env, "IMAGE_PROVIDER")).trim();
+  const provider = (map[`${KEY_PREFIX}IMAGE_PROVIDER`] ?? "").trim();
   return {
     provider: (["seedream", "openai", "qwen"].includes(provider) ? provider : "") as ImageGenProviderName | "",
     providers,
@@ -159,9 +153,13 @@ export async function saveImageGenSettings(
     statements.push(
       db
         .prepare(
-          "INSERT OR REPLACE INTO settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+          `INSERT INTO user_imagegen_settings (user_id, key, value, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id, key) DO UPDATE SET
+             value = excluded.value,
+             updated_at = excluded.updated_at`,
         )
-        .bind(key, value, now, userId),
+        .bind(userId, key, value, now),
     );
   };
 
@@ -171,25 +169,25 @@ export async function saveImageGenSettings(
   for (const name of PROVIDER_NAMES) {
     const section = body?.providers?.[name];
     if (!section) continue;
-    const envNames = FIELD_TO_ENV[name];
+    const fields = PROVIDER_SETTING_FIELDS[name];
     if (section.model !== undefined) {
-      put(`${KEY_PREFIX}${envNames.model}`, String(section.model ?? "").trim());
+      put(`${KEY_PREFIX}${fields.model}`, String(section.model ?? "").trim());
     }
     if (section.baseUrl !== undefined) {
-      put(`${KEY_PREFIX}${envNames.baseUrl}`, String(section.baseUrl ?? "").trim());
+      put(`${KEY_PREFIX}${fields.baseUrl}`, String(section.baseUrl ?? "").trim());
     }
     if (section.apiKey !== undefined) {
       const secret = String(section.apiKey).trim();
       if (secret === "") {
-        put(`${KEY_PREFIX}${envNames.apiKey}`, "");
+        put(`${KEY_PREFIX}${fields.apiKey}`, "");
       } else {
         if (!encryptionKey) {
           throw new ImageGenError(
             "unconfigured",
-            `未配置 SETTINGS_ENCRYPTION_KEY，无法加密保存 ${envNames.apiKey}。`,
+            `平台未配置 SETTINGS_ENCRYPTION_KEY，无法安全保存 ${fields.apiKey}。`,
           );
         }
-        put(`${KEY_PREFIX}${envNames.apiKey}`, await encryptSecret(encryptionKey, secret));
+        put(`${KEY_PREFIX}${fields.apiKey}`, await encryptSecret(encryptionKey, secret));
       }
     }
   }

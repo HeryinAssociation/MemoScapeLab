@@ -28,6 +28,13 @@ interface Draft {
   clearKey: boolean;
 }
 
+async function fetchSettingsView() {
+  const response = await authenticatedFetch("/api/settings/imagegen");
+  const payload = (await response.json()) as ImageGenSettingsView & { error?: string };
+  if (!response.ok) throw new Error(payload.error ?? "设置读取失败");
+  return payload;
+}
+
 export function ImageGenSettingsApp() {
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [message, setMessage] = useState("正在读取生成设置");
@@ -44,9 +51,7 @@ export function ImageGenSettingsApp() {
     setLoadState("loading");
     setMessage("正在读取生成设置");
     try {
-      const response = await authenticatedFetch("/api/settings/imagegen");
-      const payload = (await response.json()) as ImageGenSettingsView & { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "设置读取失败");
+      const payload = await fetchSettingsView();
       setView(payload);
       setProvider(payload.provider);
       setDrafts({
@@ -63,7 +68,28 @@ export function ImageGenSettingsApp() {
   };
 
   useEffect(() => {
-    void refresh();
+    let active = true;
+    fetchSettingsView()
+      .then((payload) => {
+        if (!active) return;
+        setView(payload);
+        setProvider(payload.provider);
+        setDrafts({
+          seedream: draftFrom(payload.providers.seedream),
+          openai: draftFrom(payload.providers.openai),
+          qwen: draftFrom(payload.providers.qwen),
+        });
+        setLoadState("ready");
+        setMessage("已加载当前生成配置");
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setLoadState("error");
+        setMessage(error instanceof Error ? error.message : "设置读取失败");
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const updateDraft = (name: ImageGenProviderName, patch: Partial<Draft>) => {
@@ -106,8 +132,8 @@ export function ImageGenSettingsApp() {
         <span>IMAGE GENERATION SETTINGS</span>
         <h1>生成设置</h1>
         <p>
-          配置图片生成厂商与密钥。非密钥配置与模型信息明文保存，密钥经 AES-GCM 加密后入库（主密钥
-          <code>SETTINGS_ENCRYPTION_KEY</code> 来自环境变量）；未配置主密钥时密钥只能走环境变量，不能在此保存。
+          配置你自己的图片生成厂商、模型与 API Key。每位用户的设置按账号独立保存，互不可见；
+          平台不提供或共用任何大模型 API。API Key 经 AES-GCM 加密后入库。
         </p>
       </div>
 
@@ -124,7 +150,7 @@ export function ImageGenSettingsApp() {
                     <small>{fields.key} / {fields.model}</small>
                     <h2>{PROVIDER_LABELS[name].name}</h2>
                   </span>
-                  <span>{info?.keySource === "db" ? "密钥已入库" : info?.keySource === "env" ? "环境变量" : "未配置"}</span>
+                  <span>{info?.keySource === "user" ? "个人密钥已保存" : "未配置"}</span>
                 </div>
                 {info?.keyLocked && (
                   <p style={{ margin: "0 0 14px", color: "#b34c3c", fontSize: 10 }}>
@@ -189,9 +215,21 @@ export function ImageGenSettingsApp() {
           </div>
           <p style={{ margin: "0 0 16px", color: "rgba(7,16,12,0.55)", fontSize: 10, lineHeight: 1.8 }}>
             {view?.encryptionConfigured
-              ? "主密钥已配置，页面可加密保存 API Key。"
-              : "未配置 SETTINGS_ENCRYPTION_KEY：模型与地址可保存，API Key 只能通过 .dev.vars / Cloudflare Secret 提供。"}
+              ? "你的配置只用于你发起的全景生成任务，API Key 加密保存。"
+              : "平台尚未配置数据库加密主密钥，目前不能安全保存个人 API Key。"}
           </p>
+          <label>
+            <span>默认图片生成厂商</span>
+            <select
+              value={provider}
+              onChange={(event) => setProvider(event.target.value as ImageGenProviderName | "")}
+            >
+              <option value="">请选择厂商</option>
+              <option value="seedream">Seedream（火山方舟）</option>
+              <option value="openai">OpenAI</option>
+              <option value="qwen">Qwen（阿里云百炼）</option>
+            </select>
+          </label>
           <div className="metadata-action-row">
             <small>{message}</small>
             <button type="button" disabled={saving || loadState !== "ready"} onClick={save}>

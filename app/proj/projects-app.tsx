@@ -104,7 +104,7 @@ export function ProjectsApp() {
         {status === "ready" && projects.length > 0 && (
           <div className="project-grid">
             {projects.map((project, index) => {
-              const cover = project.panoramaImageUrl || project.originalImageUrl;
+              const cover = project.panoramaThumbnailUrl || project.originalThumbnailUrl || project.panoramaImageUrl || project.originalImageUrl;
               return (
                 <Link className="project-card" href={`/work?id=${encodeURIComponent(project.id)}`} key={project.id}>
                   <div
