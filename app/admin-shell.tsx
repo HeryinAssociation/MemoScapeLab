@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { authenticatedFetch, getCurrentAuth, setCurrentAuth, type CurrentUser } from "@/src/auth/client";
 
-type AdminSection = "projects" | "work" | "about" | "user" | "users";
+type AdminSection = "projects" | "work" | "about" | "user" | "users" | "imagegen";
 
 const NAV_ITEMS = [
   { key: "home", label: "主页", symbol: "⌂", href: "", disabled: true },
@@ -51,7 +51,11 @@ export function AdminShell({
   };
 
   const navItems = user?.role === "superadmin"
-    ? [...NAV_ITEMS, { key: "users", label: "用户", symbol: "♙", href: "/usradmin", disabled: false } as const]
+    ? [
+        ...NAV_ITEMS,
+        { key: "users", label: "用户", symbol: "♙", href: "/usradmin", disabled: false } as const,
+        { key: "imagegen", label: "生成设置", symbol: "✧", href: "/imagegen", disabled: false } as const,
+      ]
     : NAV_ITEMS;
 
   return (

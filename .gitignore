@@ -45,3 +45,11 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/.agents/
+/.atomcode/
+/.claude/
+.mcp.json
+skills-lock.json
+AGENTS.md
+/.temp/
+/.workbuddy/
