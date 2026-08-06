@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS assets (
   original_filename TEXT NOT NULL,
   content_type TEXT NOT NULL,
   byte_size INTEGER NOT NULL,
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
   etag TEXT NOT NULL DEFAULT '',
   visibility TEXT NOT NULL DEFAULT 'private',
   status TEXT NOT NULL DEFAULT 'pending',

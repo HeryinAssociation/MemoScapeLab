@@ -147,6 +147,12 @@ async function ensureDatabase(env: Env, url: URL) {
   if (!assetColumns.results.some((column) => column.name === "parent_asset_id")) {
     await db.prepare("ALTER TABLE assets ADD COLUMN parent_asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE").run();
   }
+  if (!assetColumns.results.some((column) => column.name === "width")) {
+    await db.prepare("ALTER TABLE assets ADD COLUMN width INTEGER NOT NULL DEFAULT 0").run();
+  }
+  if (!assetColumns.results.some((column) => column.name === "height")) {
+    await db.prepare("ALTER TABLE assets ADD COLUMN height INTEGER NOT NULL DEFAULT 0").run();
+  }
   await db.prepare(CREATE_ASSETS_PARENT_INDEX).run();
   await db.prepare(CREATE_PROJECTS_OWNER_INDEX).run();
   const superadminId = await ensureSuperadmin(env);
@@ -479,6 +485,11 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
     }
     const contentType = String(body?.contentType ?? "").toLowerCase();
     const byteSize = Number(body?.size ?? 0);
+    const width = Number(body?.width ?? 0);
+    const height = Number(body?.height ?? 0);
+    if (!Number.isInteger(width) || width < 0 || !Number.isInteger(height) || height < 0) {
+      return json({ error: "图片尺寸无效。" }, { status: 400 });
+    }
     let extension = "";
     try {
       extension = validateLightCosUpload(kind, contentType, byteSize).extension;
@@ -517,8 +528,8 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       INSERT INTO assets (
         id, project_id, parent_asset_id, owner_user_id, kind, storage_provider,
         bucket, region, object_key, original_filename, content_type,
-        byte_size, visibility, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'lightcos', ?, ?, ?, ?, ?, ?, 'private', 'pending', ?, ?)
+        byte_size, width, height, visibility, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'lightcos', ?, ?, ?, ?, ?, ?, ?, ?, 'private', 'pending', ?, ?)
     `).bind(
       assetId,
       projectId,
@@ -531,6 +542,8 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       originalFilename,
       contentType,
       byteSize,
+      width,
+      height,
       now,
       now,
     ).run();

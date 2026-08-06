@@ -149,6 +149,18 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
       throw new Error("缩略图必须为不超过 5 MB 的 WebP 图片。");
     }
 
+    // 读取图片实际宽高，随登记信息一并写入 assets 元数据（解码失败时回退 0）
+    let width = 0;
+    let height = 0;
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      width = bitmap.width;
+      height = bitmap.height;
+      bitmap.close();
+    } catch {
+      // 宽高仅为元数据，缺失时保持 0
+    }
+
     const intentResponse = await authenticatedFetch("/api/assets/upload-intent", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -157,6 +169,8 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
         filename: file.name,
         contentType: file.type,
         size: file.size,
+        width,
+        height,
         projectId: project?.id,
         parentAssetId,
       }),
