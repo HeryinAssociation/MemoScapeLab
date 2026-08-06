@@ -44,6 +44,7 @@ import {
   type LightCosBindings,
 } from "./lightcos";
 import type { ImageGenEnv } from "./image-gen";
+import { handlePublicApi } from "./public-api";
 
 interface Fetcher {
   fetch(request: Request): Promise<Response>;
@@ -1008,6 +1009,10 @@ if (["/proj", "/work", "/about", "/usr", "/usradmin", "/imagegen"].some(
         ) {
           return Response.redirect(new URL("/proj", request.url), 302);
         }
+      }
+
+      if (url.pathname === "/api/v1" || url.pathname.startsWith("/api/v1/")) {
+        return await handlePublicApi(request, env, url);
       }
 
       if (

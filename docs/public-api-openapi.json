@@ -1,0 +1,340 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MemoScapeLab 对外只读 API",
+    "description": "供展示项目获取已发布照片项目的完整数据：历史原图/缩略图、全景图/缩略图、图片元数据、照片历史信息、投影渲染参数、作者信息与时间戳。\n\n鉴权：数据接口要求请求头 `Authorization: Bearer <READ_API_KEY>`（单个固定密钥）。未发布（draft）项目一律不可见。\n\n时间戳说明：`captureTime` 是自由文本历史标注（如“1991 年夏”），不是 ISO 时间戳；ISO 时间戳只有 `createdAt` / `updatedAt` / `startedAt` / `finishedAt`。\n\n图片说明：`thumbnailUrl` 可能为空串（AI 生成缩略图失败时），应回退到对应的原图 URL；AI 生成的全景图与服务端缩略图在 R2，无 assets 行，尺寸字段为 null，只通过项目详情的 URL 字段暴露。",
+    "version": "0.1.0"
+  },
+  "servers": [
+    { "url": "/", "description": "与当前站点同源（Swagger UI 自动使用当前页面 origin）" }
+  ],
+  "tags": [
+    { "name": "项目", "description": "已发布照片项目（含历史信息、图片、投影参数、作者）" },
+    { "name": "资产", "description": "项目的 LightCOS 图片资产与元数据" },
+    { "name": "文档", "description": "OpenAPI 文档与 Swagger UI（免密钥）" }
+  ],
+  "security": [{ "apiKey": [] }],
+  "paths": {
+    "/api/v1/projects": {
+      "get": {
+        "tags": ["项目"],
+        "summary": "已发布项目分页列表",
+        "description": "仅返回 publicationStatus 为 published 的项目，按 updatedAt 倒序。",
+        "security": [{ "apiKey": [] }],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "页码，从 1 开始（默认 1）。",
+            "schema": { "type": "integer", "minimum": 1, "default": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "每页数量（默认 20，上限 100）。",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "description": "按渲染模式过滤：sphere360 / partialSphere / curvedPhoto / flatPhoto。",
+            "schema": { "type": "string", "enum": ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "项目列表与分页信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["projects", "pagination"],
+                  "properties": {
+                    "projects": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectSummary" } },
+                    "pagination": { "$ref": "#/components/schemas/Pagination" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/projects/{id}": {
+      "get": {
+        "tags": ["项目"],
+        "summary": "已发布项目详情",
+        "description": "返回单个已发布项目的聚合数据：历史信息、四张图 URL、投影/视角参数、热点、资产元数据、作者与 AI 生成溯源。",
+        "security": [{ "apiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "description": "项目 ID", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "项目完整数据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["project"],
+                  "properties": { "project": { "$ref": "#/components/schemas/ProjectDetail" } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/assets": {
+      "get": {
+        "tags": ["资产"],
+        "summary": "项目的图片资产列表",
+        "description": "仅返回已发布项目中 status 为 ready 的 LightCOS 资产（original / panorama / thumbnail）。AI 生成全景及其服务端缩略图在 R2、无 assets 行，不在此列表，请使用项目详情的 URL 字段。",
+        "security": [{ "apiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "description": "项目 ID", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "资产列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["assets"],
+                  "properties": { "assets": { "type": "array", "items": { "$ref": "#/components/schemas/AssetItem" } } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "tags": ["文档"],
+        "summary": "OpenAPI 3.x 文档（免密钥）",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "本规范文档",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/docs": {
+      "get": {
+        "tags": ["文档"],
+        "summary": "Swagger UI 交互文档页（免密钥）",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Swagger UI HTML 页面",
+            "content": { "text/html": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "请求头 Authorization: Bearer <READ_API_KEY>"
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "API Key 缺失或无效",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["error"],
+              "properties": { "error": { "type": "string", "example": "API Key 缺失或无效。" } }
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "项目不存在或未发布",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["error"],
+              "properties": { "error": { "type": "string", "example": "项目不存在或未发布。" } }
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "请求参数无效",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["error"],
+              "properties": { "error": { "type": "string", "example": "mode 参数无效。" } }
+            }
+          }
+        }
+      },
+      "NotConfigured": {
+        "description": "服务端未配置 READ_API_KEY",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["error"],
+              "properties": { "error": { "type": "string", "example": "对外 API 未启用（缺少 READ_API_KEY）。" } }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Pagination": {
+        "type": "object",
+        "required": ["page", "limit", "total", "totalPages"],
+        "properties": {
+          "page": { "type": "integer", "example": 1 },
+          "limit": { "type": "integer", "example": 20 },
+          "total": { "type": "integer", "example": 42 },
+          "totalPages": { "type": "integer", "example": 3 }
+        }
+      },
+      "ProjectSummary": {
+        "type": "object",
+        "required": ["id", "title", "mode", "publicationStatus", "createdAt", "updatedAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "mode": { "type": "string", "enum": ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"] },
+          "captureTime": { "type": "string", "description": "历史年代自由文本，非 ISO 时间戳", "example": "1991 年夏" },
+          "location": { "type": "string" },
+          "publicationStatus": { "type": "string", "enum": ["published"] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "coverUrl": { "type": "string", "description": "卡片封面：优先全景缩略图，逐级回退到原图", "format": "uri" },
+          "originalImageUrl": { "type": "string", "format": "uri" },
+          "panoramaImageUrl": { "type": "string", "format": "uri" }
+        }
+      },
+      "ProjectDetail": {
+        "type": "object",
+        "required": ["id", "title", "mode", "workflowStep", "publicationStatus", "createdAt", "updatedAt", "history", "images", "render", "assets", "author", "scene"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "mode": { "type": "string", "enum": ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"] },
+          "workflowStep": { "type": "integer", "minimum": 1, "maximum": 4 },
+          "publicationStatus": { "type": "string", "enum": ["published"] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "history": {
+            "type": "object",
+            "required": ["captureTime", "location", "notes", "subtitle", "metadata"],
+            "properties": {
+              "captureTime": { "type": "string", "description": "历史年代自由文本，非 ISO 时间戳" },
+              "location": { "type": "string" },
+              "notes": { "type": "string" },
+              "subtitle": { "type": "string" },
+              "metadata": {
+                "type": ["object", "null"],
+                "description": "档案来源与 AI 处理标记",
+                "properties": {
+                  "sourceYear": { "type": "string" },
+                  "sourceLabel": { "type": "string" },
+                  "sourceUrl": { "type": "string" },
+                  "originalImageUrl": { "type": "string" },
+                  "sourceRecord": { "type": "object" },
+                  "aiColorized": { "type": "boolean" },
+                  "aiExpanded": { "type": "boolean" },
+                  "disclaimer": { "type": "string" }
+                }
+              }
+            }
+          },
+          "images": {
+            "type": "object",
+            "required": ["originalImageUrl", "originalThumbnailUrl", "panoramaImageUrl", "panoramaThumbnailUrl"],
+            "properties": {
+              "originalImageUrl": { "type": "string", "format": "uri" },
+              "originalThumbnailUrl": { "type": "string", "format": "uri", "description": "可能为空串，空时回退 originalImageUrl" },
+              "panoramaImageUrl": { "type": "string", "format": "uri" },
+              "panoramaThumbnailUrl": { "type": "string", "format": "uri", "description": "AI 生成缩略图失败时为空串，空时回退 panoramaImageUrl" }
+            }
+          },
+          "render": {
+            "type": "object",
+            "required": ["projection", "view", "hotspots"],
+            "properties": {
+              "projection": {
+                "type": ["object", "null"],
+                "description": "自适应投影参数（horizontalSpan 等）或有限球面参数（haov 等），null 表示默认投影"
+              },
+              "view": {
+                "type": "object",
+                "description": "初始视角与可调范围（yaw/pitch/hfov 及 min/max）"
+              },
+              "hotspots": { "type": "array", "description": "热点说明（位置 + 文字）" }
+            }
+          },
+          "assets": { "type": "array", "items": { "$ref": "#/components/schemas/AssetItem" } },
+          "author": {
+            "type": ["object", "null"],
+            "description": "仅公开 username/avatar/createdAt，绝不包含 email/phone/role/status",
+            "properties": {
+              "username": { "type": "string" },
+              "avatar": { "type": "string", "format": "uri", "description": "可能为空串" },
+              "createdAt": { "type": "string", "format": "date-time" }
+            }
+          },
+          "aiProvenance": {
+            "type": ["object", "null"],
+            "description": "最近一次成功的 AI 生成任务溯源；从未生成时为 null",
+            "properties": {
+              "provider": { "type": "string", "example": "seedream" },
+              "model": { "type": "string" },
+              "status": { "type": "string", "enum": ["succeeded"] },
+              "startedAt": { "type": ["string", "null"], "format": "date-time" },
+              "finishedAt": { "type": ["string", "null"], "format": "date-time" }
+            }
+          },
+          "scene": {
+            "type": "object",
+            "description": "完整场景（source/thumbnail 已转为绝对 URL），供展示端还原沉浸式渲染"
+          }
+        }
+      },
+      "AssetItem": {
+        "type": "object",
+        "required": ["id", "kind", "parentAssetId", "url", "contentType", "byteSize", "width", "height", "etag", "createdAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["original", "panorama", "thumbnail", "avatar"] },
+          "parentAssetId": { "type": ["string", "null"], "description": "缩略图指向的父资产 ID，非缩略图为 null" },
+          "url": { "type": "string", "format": "uri" },
+          "contentType": { "type": "string", "example": "image/webp" },
+          "byteSize": { "type": "integer" },
+          "width": { "type": ["integer", "null"], "description": "像素宽度；0/未知时为 null" },
+          "height": { "type": ["integer", "null"], "description": "像素高度；0/未知时为 null" },
+          "etag": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

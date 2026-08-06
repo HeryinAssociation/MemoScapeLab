@@ -58,6 +58,10 @@ export interface AuthEnv extends LightCosBindings {
   TENCENT_SES_REGION?: string;
   TENCENT_SES_FROM?: string;
   TENCENT_SES_TEMPLATE_ID?: string;
+  /** 对外只读 API（/api/v1）的 Bearer 密钥；未配置时数据接口返回 503。 */
+  READ_API_KEY?: string;
+  /** 对外 API 允许的跨域来源，多个用英文逗号分隔。 */
+  PUBLIC_API_ALLOWED_ORIGIN?: string;
 }
 
 export interface UserRow {
