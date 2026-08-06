@@ -241,22 +241,23 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     }
   };
 
-  const storeGeneratedPanorama = async (sourceUrl: string, taskId: string) => {
+  const storeGeneratedPanorama = async (sourceUrl: string, taskId: string, thumbnailUrl: string) => {
     const response = await fetch(sourceUrl);
     if (!response.ok) throw new Error("无法读取刚生成的全景图。");
     const blob = await response.blob();
     const contentType = ALLOWED_UPLOAD_TYPES.has(blob.type) ? blob.type : "image/png";
     const extension = contentType === "image/jpeg" ? "jpg" : contentType.split("/")[1];
     const file = new File([blob], `aigc-${taskId}.${extension}`, { type: contentType });
-    const pair = await uploadImagePair(file, "panorama");
+    // 全景图仍存入 LightCOS；缩略图由服务端 IMAGES 生成并落 R2，这里只透传 URL
+    const sourceAsset = await uploadAsset(file, "panorama");
     const currentScene = project?.scene ?? INITIAL_SCENE;
     await saveProject({
-      panoramaImageUrl: pair.source.url,
-      panoramaThumbnailUrl: pair.thumbnail.url,
+      panoramaImageUrl: sourceAsset.url,
+      panoramaThumbnailUrl: thumbnailUrl,
       scene: {
         ...currentScene,
-        source: pair.source.url,
-        thumbnail: pair.thumbnail.url,
+        source: sourceAsset.url,
+        thumbnail: thumbnailUrl || sourceAsset.url,
         metadata: { ...currentScene.metadata, aiExpanded: true },
       },
       workflowStep: 2,
@@ -300,16 +301,17 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
           status?: string;
           error?: string;
           images?: Array<{ key: string; url: string }>;
+          thumbnailUrl?: string;
         };
         if (!response.ok) throw new Error(payload.error ?? "任务查询失败");
         if (payload.status === "succeeded") {
           stopPolling();
           const generatedUrl = payload.images?.[0]?.url;
           if (!generatedUrl) throw new Error("生成任务没有返回全景图片。");
-          setMessage("正在生成缩略图并保存全景文件");
-          await storeGeneratedPanorama(generatedUrl, taskId);
+          setMessage("正在保存全景文件");
+          await storeGeneratedPanorama(generatedUrl, taskId, payload.thumbnailUrl ?? "");
           setGenStatus("succeeded");
-          setMessage("全景图与 WebP 缩略图已保存");
+          setMessage("全景图已保存");
         } else if (payload.status === "failed") {
           stopPolling();
           setGenStatus("failed");

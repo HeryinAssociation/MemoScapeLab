@@ -852,6 +852,10 @@ async function handleGenerateApi(
       }
     }
     const resultKeys = JSON.parse(task.result_keys) as string[];
+    // 缩略图由后台任务落 R2 并写入项目 panorama_thumbnail_url，这里直接透传给前端轮询
+    const project = await env.DB.prepare(
+      "SELECT panorama_thumbnail_url FROM projects WHERE id = ?",
+    ).bind(task.project_id).first<{ panorama_thumbnail_url: string }>();
     return json({
       taskId: task.id,
       status: task.status,
@@ -859,6 +863,7 @@ async function handleGenerateApi(
       provider: task.provider,
       model: task.model,
       images: resultKeys.map((key) => ({ key, url: `/api/assets/${encodeURIComponent(key)}` })),
+      thumbnailUrl: project?.panorama_thumbnail_url ?? "",
     });
   }
 
@@ -900,6 +905,23 @@ async function runImageGenTask(env: Env, taskId: string) {
       r2KeyPrefix: `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated`,
     });
     const resultKeys = result.images.map((image) => image.key);
+    const primaryUrl = `/api/assets/${encodeURIComponent(resultKeys[0])}`;
+    // 用 Cloudflare Images 为生成图产 WebP 缩略图落 R2；失败不阻断任务，全景图仍可用
+    let thumbnailUrl = "";
+    try {
+      const primary = await env.MEDIA.get(resultKeys[0]);
+      if (primary?.body) {
+        const thumbKey = `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated/thumbnails/${crypto.randomUUID()}.webp`;
+        const transformed = await env.IMAGES.input(primary.body)
+          .transform({ width: 1600, height: 900, fit: "scale-down" })
+          .output({ format: "webp", quality: 0.82 });
+        const thumbBytes = await transformed.response().arrayBuffer();
+        await env.MEDIA.put(thumbKey, thumbBytes, { httpMetadata: { contentType: "image/webp" } });
+        thumbnailUrl = `/api/assets/${encodeURIComponent(thumbKey)}`;
+      }
+    } catch {
+      // 缩略图生成失败时保持空值，前端封面回退到全景原图
+    }
     await env.DB.batch([
       env.DB
         .prepare(
@@ -907,8 +929,10 @@ async function runImageGenTask(env: Env, taskId: string) {
         )
         .bind(JSON.stringify(resultKeys), now(), taskId),
       env.DB
-        .prepare("UPDATE projects SET panorama_image_url = ?, updated_at = ? WHERE id = ?")
-        .bind(`/api/assets/${encodeURIComponent(resultKeys[0])}`, now(), task.project_id),
+        .prepare(
+          "UPDATE projects SET panorama_image_url = ?, panorama_thumbnail_url = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(primaryUrl, thumbnailUrl, now(), task.project_id),
     ]);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
