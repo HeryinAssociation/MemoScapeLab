@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hashPassword, verifyPassword } from "../worker/auth";
+import { hashPassword, isSuperadminOnlyPage, verifyPassword } from "../worker/auth";
 import { sendTencentVerificationCodeWithRetry } from "../worker/tencent-ses";
 
 test("stores a salted one-way password hash", async () => {
@@ -54,4 +54,11 @@ test("does not duplicate an accepted Tencent delivery", async () => {
   );
   assert.equal(result.ok, true);
   assert.equal(attempts, 1);
+});
+
+test("keeps per-user image generation settings available to regular users", () => {
+  assert.equal(isSuperadminOnlyPage("/usradmin"), true);
+  assert.equal(isSuperadminOnlyPage("/usradmin/users"), true);
+  assert.equal(isSuperadminOnlyPage("/imagegen"), false);
+  assert.equal(isSuperadminOnlyPage("/imagegen/provider"), false);
 });

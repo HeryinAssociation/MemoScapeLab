@@ -4,6 +4,7 @@ import {
   createLightCosPresignedUrl,
   lightCosBucketForKind,
   lightCosConfigFromEnv,
+  lightCosRequestUrl,
   missingLightCosBindings,
   validateLightCosUpload,
 } from "../worker/lightcos";
@@ -73,4 +74,12 @@ test("creates a short-lived method-bound LightCOS upload URL", async () => {
   assert.equal(url.searchParams.get("q-header-list"), "host");
   assert.match(url.searchParams.get("q-signature") ?? "", /^[a-f0-9]{40}$/);
   assert.doesNotMatch(signedUrl, new RegExp(config.secretKey));
+});
+
+test("routes signed LightCOS requests through the optional self-hosted proxy", () => {
+  const signedUrl = "https://bucket.cos.ap-shanghai.myqcloud.com/path/image.jpg?q-signature=abc";
+  assert.equal(lightCosRequestUrl(config, signedUrl), signedUrl);
+  const proxied = new URL(lightCosRequestUrl({ ...config, proxyEndpoint: "http://ses-proxy:8788/cos" }, signedUrl));
+  assert.equal(proxied.origin + proxied.pathname, "http://ses-proxy:8788/cos");
+  assert.equal(proxied.searchParams.get("url"), signedUrl);
 });

@@ -10,6 +10,7 @@ export interface TencentSesConfig {
   region: string;
   from: string;
   templateId: number;
+  endpoint?: string;
 }
 
 export interface TencentSesResult {
@@ -90,7 +91,7 @@ export async function sendTencentVerificationCode(
     TriggerType: 1,
   });
   const authorization = await createAuthorization(config, timestamp, body);
-  const response = await fetch(SES_ENDPOINT, {
+  const response = await fetch(config.endpoint || SES_ENDPOINT, {
     method: "POST",
     headers: {
       authorization,

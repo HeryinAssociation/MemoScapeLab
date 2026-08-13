@@ -26,6 +26,7 @@ import {
   ensureSuperadmin,
   getAuth,
   handleAuthApi,
+  isSuperadminOnlyPage,
   isLocalRequest,
   json,
   requireCsrf,
@@ -38,6 +39,7 @@ import {
   inspectLightCosObject,
   lightCosBucketForKind,
   lightCosConfigFromEnv,
+  lightCosRequestUrl,
   missingLightCosBindings,
   validateLightCosUpload,
   type LightCosAssetKind,
@@ -297,7 +299,7 @@ async function generationReferenceToDataUrl(
     key: asset.object_key,
     expiresInSeconds: 5 * 60,
   });
-  const response = await fetch(signedUrl, { method: "GET" });
+  const response = await fetch(lightCosRequestUrl(config, signedUrl), { method: "GET" });
   if (!response.ok) {
     throw new ImageGenError(
       "upstream_error",
@@ -594,7 +596,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
         key: asset.object_key,
         expiresInSeconds: 5 * 60,
       });
-      const uploadResponse = await fetch(uploadUrl, {
+      const uploadResponse = await fetch(lightCosRequestUrl(config, uploadUrl), {
         method: "PUT",
         headers: { "content-type": asset.content_type },
         body: bytes,
@@ -655,7 +657,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
         key: asset.object_key,
         expiresInSeconds: 5 * 60,
       });
-      const remote = await fetch(signedUrl, { method: "GET" });
+      const remote = await fetch(lightCosRequestUrl(config, signedUrl), { method: "GET" });
       if (!remote.ok || !remote.body) {
         return new Response("LightCOS object unavailable", { status: 502 });
       }
@@ -1003,10 +1005,7 @@ if (["/proj", "/work", "/about", "/usr", "/usradmin", "/imagegen"].some(
         if (!auth.user.email_verified && !isUserSettings) {
           return Response.redirect(new URL("/verify-email?pending=1", request.url), 302);
         }
-        if (
-          (url.pathname.startsWith("/usradmin") || url.pathname.startsWith("/imagegen")) &&
-          auth.user.role !== "superadmin"
-        ) {
+        if (isSuperadminOnlyPage(url.pathname) && auth.user.role !== "superadmin") {
           return Response.redirect(new URL("/proj", request.url), 302);
         }
       }

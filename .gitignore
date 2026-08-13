@@ -52,4 +52,7 @@ next-env.d.ts
 skills-lock.json
 AGENTS.md
 /.temp/
+/.codex-tmp/
+/deploy/self-hosted/secrets.dev.vars
+/deploy/self-hosted/data/
 /.workbuddy/

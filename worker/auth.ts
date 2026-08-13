@@ -5,6 +5,7 @@ import {
   inspectLightCosObject,
   lightCosBucketForKind,
   lightCosConfigFromEnv,
+  lightCosRequestUrl,
   missingLightCosBindings,
   validateLightCosUpload,
   type LightCosBindings,
@@ -58,6 +59,7 @@ export interface AuthEnv extends LightCosBindings {
   TENCENT_SES_REGION?: string;
   TENCENT_SES_FROM?: string;
   TENCENT_SES_TEMPLATE_ID?: string;
+  TENCENT_SES_ENDPOINT?: string;
   /** 对外只读 API（/api/v1）的 Bearer 密钥；未配置时数据接口返回 503。 */
   READ_API_KEY?: string;
   /** 对外 API 允许的跨域来源，多个用英文逗号分隔。 */
@@ -193,6 +195,11 @@ export async function verifyPassword(password: string, stored: string, pepper = 
     difference |= actual[index] ^ expected[index];
   }
   return difference === 0;
+}
+
+/** Only the user-administration console is restricted to superadmins. */
+export function isSuperadminOnlyPage(pathname: string): boolean {
+  return pathname === "/usradmin" || pathname.startsWith("/usradmin/");
 }
 
 export async function ensureAuthDatabase(db: D1Database) {
@@ -402,11 +409,16 @@ async function createEmailVerification(env: AuthEnv, request: Request, user: Use
         region: env.TENCENT_SES_REGION || "ap-guangzhou",
         from: env.TENCENT_SES_FROM,
         templateId,
+        endpoint: env.TENCENT_SES_ENDPOINT,
       },
       user.email,
       credential,
     );
     if (!result.ok) {
+      console.error("Tencent SES delivery failed", {
+        errorCode: result.errorCode ?? "UNKNOWN_ERROR",
+        requestId: result.requestId,
+      });
       await discardUndeliveredCredential();
       return { delivery: "failed" as const, providerErrorCode: result.errorCode };
     }
@@ -515,7 +527,7 @@ async function deleteUserMedia(env: AuthEnv, userId: string) {
         key: asset.object_key,
         expiresInSeconds: 5 * 60,
       });
-      await fetch(deleteUrl, { method: "DELETE" });
+      await fetch(lightCosRequestUrl(lightCosConfig, deleteUrl), { method: "DELETE" });
     }
   }
 
@@ -770,7 +782,7 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
         const uploadUrl = await createLightCosPresignedUrl({
           config, method: "PUT", bucket, key, expiresInSeconds: 5 * 60,
         });
-        const uploadResponse = await fetch(uploadUrl, {
+        const uploadResponse = await fetch(lightCosRequestUrl(config, uploadUrl), {
           method: "PUT",
           headers: { "content-type": input.type },
           body: await input.arrayBuffer(),
@@ -816,7 +828,7 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
               key: previousAsset.object_key,
               expiresInSeconds: 5 * 60,
             });
-            await fetch(deleteUrl, { method: "DELETE" });
+            await fetch(lightCosRequestUrl(config, deleteUrl), { method: "DELETE" });
           }
           await env.DB.prepare("DELETE FROM assets WHERE id = ? AND owner_user_id = ?")
             .bind(previousId, auth.user.id)
@@ -878,7 +890,7 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
         key: asset.object_key,
         expiresInSeconds: 5 * 60,
       });
-      const remote = await fetch(readUrl, { method: "GET" });
+      const remote = await fetch(lightCosRequestUrl(config, readUrl), { method: "GET" });
       if (!remote.ok || !remote.body) return new Response("Not found", { status: 404 });
       return new Response(remote.body, {
         headers: {

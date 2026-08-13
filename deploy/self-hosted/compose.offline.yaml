@@ -1,0 +1,4 @@
+services:
+  memoscape:
+    build:
+      dockerfile: deploy/self-hosted/Dockerfile.offline

@@ -11,6 +11,7 @@ export interface LightCosBindings {
   TENCENT_LIGHTCOS_SECRET_ID?: string;
   TENCENT_LIGHTCOS_SECRET_KEY?: string;
   TENCENT_LIGHTCOS_PUBLIC_DOMAIN?: string;
+  TENCENT_LIGHTCOS_PROXY_ENDPOINT?: string;
 }
 
 export interface LightCosConfig {
@@ -22,6 +23,7 @@ export interface LightCosConfig {
   secretId: string;
   secretKey: string;
   publicDomain: string;
+  proxyEndpoint?: string;
 }
 
 const REQUIRED_LIGHTCOS_BINDINGS = [
@@ -92,6 +94,7 @@ export function lightCosConfigFromEnv(env: LightCosBindings): LightCosConfig | n
     secretId: String(env.TENCENT_LIGHTCOS_SECRET_ID ?? "").trim(),
     secretKey: String(env.TENCENT_LIGHTCOS_SECRET_KEY ?? "").trim(),
     publicDomain: String(env.TENCENT_LIGHTCOS_PUBLIC_DOMAIN ?? "").trim(),
+    proxyEndpoint: String(env.TENCENT_LIGHTCOS_PROXY_ENDPOINT ?? "").trim(),
   };
   if (
     !config.appId ||
@@ -142,6 +145,13 @@ export function lightCosObjectHost(bucket: string, region: string) {
   return `${bucket}.cos.${region}.myqcloud.com`;
 }
 
+export function lightCosRequestUrl(config: LightCosConfig, signedUrl: string) {
+  if (!config.proxyEndpoint) return signedUrl;
+  const endpoint = new URL(config.proxyEndpoint);
+  endpoint.searchParams.set("url", signedUrl);
+  return endpoint.toString();
+}
+
 export async function createLightCosPresignedUrl({
   config,
   method,
@@ -190,7 +200,7 @@ export async function inspectLightCosObject(
     key,
     expiresInSeconds: 5 * 60,
   });
-  const response = await fetch(url, { method: "HEAD" });
+  const response = await fetch(lightCosRequestUrl(config, url), { method: "HEAD" });
   if (!response.ok) {
     throw new Error(`LightCOS 对象校验失败（HTTP ${response.status}）。`);
   }

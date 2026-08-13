@@ -1,0 +1,27 @@
+ARG NODE_IMAGE=debian:bookworm-slim
+FROM ${NODE_IMAGE}
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=/pnpm:$PATH
+ENV NODE_ENV=production
+ENV npm_config_registry=https://registry.npmmirror.com
+
+WORKDIR /app
+
+# For hosts that cannot pull the regular Node image. Place the official Node
+# archive at the repository root before building this Dockerfile.
+COPY node-v22.19.0-linux-x64.tar.gz /tmp/node22.tar.gz
+RUN tar -xzf /tmp/node22.tar.gz -C /usr/local --strip-components=1 && \
+    rm /tmp/node22.tar.gz && \
+    node --version && \
+    corepack prepare pnpm@10.6.5 --activate
+
+COPY package.json pnpm-lock.yaml .npmrc ./
+RUN corepack pnpm install --frozen-lockfile
+
+COPY . .
+RUN corepack pnpm build
+
+EXPOSE 3000
+
+CMD ["corepack", "pnpm", "exec", "wrangler", "dev", "--config", "dist/server/wrangler.json", "--ip", "0.0.0.0", "--port", "3000", "--persist-to", "/data", "--show-interactive-dev-session", "false"]
