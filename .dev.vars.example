@@ -12,6 +12,8 @@ TENCENTCLOUD_SECRET_KEY=replace_with_a_new_secret_key
 TENCENT_SES_REGION=ap-guangzhou
 TENCENT_SES_FROM=MemoscapeLab <verify@mail.metaconstr.net>
 TENCENT_SES_TEMPLATE_ID=replace_with_an_approved_template_id
+# Optional self-hosted-only endpoint. Leave unset for direct Tencent SES access.
+# TENCENT_SES_ENDPOINT=http://ses-proxy:8788/
 
 # Project image and avatar storage: Tencent LighthouseCOS. Keep these credentials separate from
 # the SES sender credentials and grant only the two buckets below.
@@ -22,6 +24,8 @@ TENCENT_LIGHTCOS_ARCHIVE_BUCKET=memoscape-archive-1306930939
 TENCENT_LIGHTCOS_MEDIA_BUCKET=memoscape-media-1306930939
 TENCENT_LIGHTCOS_SECRET_ID=replace_with_a_dedicated_cos_secret_id
 TENCENT_LIGHTCOS_SECRET_KEY=replace_with_a_dedicated_cos_secret_key
+# Optional self-hosted-only fixed-target proxy endpoint.
+# TENCENT_LIGHTCOS_PROXY_ENDPOINT=http://ses-proxy:8788/cos
 # Leave blank until the published image domain is ready.
 TENCENT_LIGHTCOS_PUBLIC_DOMAIN=
 
