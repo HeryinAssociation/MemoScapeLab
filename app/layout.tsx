@@ -28,6 +28,9 @@ export async function generateMetadata(): Promise<Metadata> {
     title: "MemoscapeLab｜影像项目管理工作台",
     description:
       "保存历史照片、全景素材、元数据与投影视角参数的本地项目管理工作台。",
+    icons: {
+      icon: [{ url: "/brand/mark.svg", type: "image/svg+xml" }],
+    },
     openGraph: {
       title: "MemoscapeLab",
       description: "历史影像项目管理与投影调参工作台",

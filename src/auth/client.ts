@@ -8,6 +8,7 @@ export interface CurrentUser {
   role: "user" | "superadmin";
   status: "active" | "banned";
   mustChangePassword: boolean;
+  onboardingCompleted: boolean;
   avatarUrl: string;
   projectCount?: number;
   createdAt: string;

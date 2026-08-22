@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { setCurrentAuth, type CurrentUser } from "@/src/auth/client";
+import { BrandLockup } from "../brand-art";
 
 export function LoginApp() {
   const [loading, setLoading] = useState(false);
@@ -41,7 +42,7 @@ export function LoginApp() {
   return (
     <main className="auth-page">
       <section className="auth-visual" aria-hidden="true">
-        <div className="auth-brand"><span>ML</span><div><strong>MEMOSCAPELAB</strong><small>历史影像沉浸式工作台</small></div></div>
+        <div className="auth-brand"><BrandLockup tone="on-dark" /><small>历史影像沉浸式工作台</small></div>
         <div className="auth-visual-copy"><span>ARCHIVE ACCESS / 01</span><h1>让历史照片<br />重新拥有空间。</h1><p>管理原始档案、生成全景并保存每一次投影调参。</p></div>
         <div className="auth-grid-note">31.2304° N / 121.4737° E<br />SHANGHAI IMAGE ARCHIVE</div>
       </section>

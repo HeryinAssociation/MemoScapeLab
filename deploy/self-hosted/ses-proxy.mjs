@@ -1,4 +1,5 @@
 import http from "node:http";
+import { Readable } from "node:stream";
 
 const PORT = 8788;
 const MAX_BODY_BYTES = 55 * 1024 * 1024;
@@ -78,18 +79,28 @@ const server = http.createServer(async (request, response) => {
       body: request.method === "GET" || request.method === "HEAD" ? undefined : Buffer.concat(chunks),
       signal: AbortSignal.timeout(20_000),
     });
-    const body = Buffer.from(await upstream.arrayBuffer());
-    const responseHeaders = {
-      "content-length": request.method === "HEAD"
-        ? upstream.headers.get("content-length") || "0"
-        : String(body.length),
-    };
+    const responseHeaders = {};
+    const contentLength = upstream.headers.get("content-length");
+    if (contentLength) responseHeaders["content-length"] = contentLength;
     for (const name of ["content-type", "etag", "last-modified", "content-range", "accept-ranges"]) {
       const value = upstream.headers.get(name);
       if (value) responseHeaders[name] = value;
     }
     response.writeHead(upstream.status, responseHeaders);
-    response.end(body);
+    if (request.method === "HEAD" || !upstream.body) {
+      response.end();
+      return;
+    }
+
+    // Stream COS downloads instead of buffering every image in memory. /proj
+    // can request many covers, so buffering delayed headers and amplified load.
+    const bodyStream = Readable.fromWeb(upstream.body);
+    bodyStream.on("error", (error) => {
+      console.error("Proxy response stream failed", error instanceof Error ? error.message : "unknown error");
+      response.destroy();
+    });
+    request.on("aborted", () => bodyStream.destroy());
+    bodyStream.pipe(response);
   } catch (error) {
     console.error("SES proxy request failed", error instanceof Error ? error.message : "unknown error");
     json(response, 502, { error: "Upstream request failed" });

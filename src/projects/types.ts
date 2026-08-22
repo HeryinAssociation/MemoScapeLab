@@ -1,6 +1,7 @@
 import type { ImmersiveScene, SceneMode } from "../core/projection-types";
 
 export type PublicationStatus = "draft" | "published";
+export type ModerationStatus = "clear" | "taken_down";
 
 export interface PanoramaProject {
   id: string;
@@ -16,6 +17,10 @@ export interface PanoramaProject {
   scene: ImmersiveScene;
   workflowStep: number;
   publicationStatus: PublicationStatus;
+  moderationStatus?: ModerationStatus;
+  moderationReason?: string;
+  moderatedAt?: string | null;
+  canEdit?: boolean;
   createdAt: string;
   updatedAt: string;
 }

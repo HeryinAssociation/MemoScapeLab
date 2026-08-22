@@ -67,7 +67,10 @@ export function UserSettingsApp() {
 
   const changePassword = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setError(""); setMessage("");
-    const form = new FormData(event.currentTarget);
+    // React clears SyntheticEvent.currentTarget after the synchronous handler
+    // frame. Keep the actual form node before awaiting the API request.
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const newPassword = String(form.get("newPassword") ?? "");
     if (newPassword !== form.get("confirmPassword")) { setError("两次输入的新密码不一致。"); return; }
     setBusy("password");
@@ -80,7 +83,7 @@ export function UserSettingsApp() {
       if (!response.ok || !payload.csrfToken) throw new Error(payload.error ?? "密码修改失败");
       const nextUser = { ...user!, mustChangePassword: false };
       setCurrentAuth({ user: nextUser, csrfToken: payload.csrfToken }); setUser(nextUser);
-      event.currentTarget.reset(); setMessage("密码已经更新，其他设备上的登录状态已解除。");
+      formElement.reset(); setMessage("密码已经更新，其他设备上的登录状态已解除。");
     } catch (caught) { setError(caught instanceof Error ? caught.message : "密码修改失败"); }
     finally { setBusy(""); }
   };

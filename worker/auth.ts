@@ -60,7 +60,7 @@ export interface AuthEnv extends LightCosBindings {
   TENCENT_SES_FROM?: string;
   TENCENT_SES_TEMPLATE_ID?: string;
   TENCENT_SES_ENDPOINT?: string;
-  /** 对外只读 API（/api/v1）的 Bearer 密钥；未配置时数据接口返回 503。 */
+  /** 对外只读 API（/api/v1）项目列表的 Bearer 密钥；单项目公开详情免密。 */
   READ_API_KEY?: string;
   /** 对外 API 允许的跨域来源，多个用英文逗号分隔。 */
   PUBLIC_API_ALLOWED_ORIGIN?: string;
@@ -78,6 +78,7 @@ export interface UserRow {
   role: "user" | "superadmin";
   status: "active" | "banned";
   must_change_password: number;
+  onboarding_completed_at: string | null;
   created_at: string;
   updated_at: string;
   banned_at: string | null;
@@ -204,6 +205,12 @@ export function isSuperadminOnlyPage(pathname: string): boolean {
 
 export async function ensureAuthDatabase(db: D1Database) {
   await db.batch(AUTH_SCHEMA_STATEMENTS.map((sql) => db.prepare(sql)));
+  const userColumns = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
+  if (!userColumns.results.some((column) => column.name === "onboarding_completed_at")) {
+    await db.prepare("ALTER TABLE users ADD COLUMN onboarding_completed_at TEXT").run();
+    // Accounts that predate onboarding should not be interrupted after deployment.
+    await db.prepare("UPDATE users SET onboarding_completed_at = updated_at WHERE onboarding_completed_at IS NULL").run();
+  }
 }
 
 export function isLocalRequest(url: URL) {
@@ -224,10 +231,10 @@ export async function ensureSuperadmin(env: AuthEnv) {
   await env.DB.prepare(`
     INSERT OR IGNORE INTO users (
       id, username, email, email_verified, phone_e164, phone_verified,
-      password_hash, role, status, must_change_password, created_at, updated_at
-    ) VALUES (?, ?, ?, 1, NULL, 0, ?, 'superadmin', 'active', 1, ?, ?)
+      password_hash, role, status, must_change_password, onboarding_completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 1, NULL, 0, ?, 'superadmin', 'active', 1, ?, ?, ?)
   `)
-    .bind(SUPERADMIN_ID, username, email, passwordHash, now, now)
+    .bind(SUPERADMIN_ID, username, email, passwordHash, now, now, now)
     .run();
   return SUPERADMIN_ID;
 }
@@ -328,6 +335,7 @@ export function publicUser(user: UserRow, projectCount?: number) {
     role: user.role,
     status: user.status,
     mustChangePassword: Boolean(user.must_change_password),
+    onboardingCompleted: Boolean(user.onboarding_completed_at),
     avatarUrl: user.avatar_key ? `/api/users/${encodeURIComponent(user.id)}/avatar?v=${encodeURIComponent(user.updated_at)}` : "",
     createdAt: user.created_at,
     updatedAt: user.updated_at,
@@ -564,8 +572,8 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
     await env.DB.prepare(`
       INSERT INTO users (
         id, username, email, email_verified, phone_e164, phone_verified,
-        password_hash, role, status, must_change_password, created_at, updated_at
-      ) VALUES (?, ?, ?, 0, ?, 0, ?, 'user', 'active', 0, ?, ?)
+        password_hash, role, status, must_change_password, onboarding_completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 0, ?, 0, ?, 'user', 'active', 0, NULL, ?, ?)
     `)
       .bind(userId, username, email, phone, passwordHash, now, now)
       .run();
@@ -691,6 +699,20 @@ export async function handleAuthApi(request: Request, env: AuthEnv, url: URL): P
       .run();
     const user = (await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(auth.user.id).first<UserRow>())!;
     return json({ user: publicUser(user) });
+  }
+
+  if (bodyPath === "/api/users/me/onboarding" && request.method === "POST") {
+    if (!auth) return json({ error: "尚未登录。" }, { status: 401 });
+    if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
+    const completedAt = new Date().toISOString();
+    await env.DB.prepare(`
+      UPDATE users
+      SET onboarding_completed_at = COALESCE(onboarding_completed_at, ?), updated_at = ?
+      WHERE id = ?
+    `)
+      .bind(completedAt, completedAt, auth.user.id)
+      .run();
+    return json({ onboardingCompleted: true, completedAt });
   }
 
   if (bodyPath === "/api/users/me/password" && request.method === "POST") {

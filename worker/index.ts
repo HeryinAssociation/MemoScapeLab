@@ -47,6 +47,12 @@ import {
 } from "./lightcos";
 import type { ImageGenEnv } from "./image-gen";
 import { handlePublicApi } from "./public-api";
+import { deleteOwnedProject } from "./project-delete";
+import {
+  moderateProject,
+  ProjectModerationInputError,
+  type ProjectModerationAction,
+} from "./project-moderation";
 
 interface Fetcher {
   fetch(request: Request): Promise<Response>;
@@ -79,10 +85,19 @@ interface ProjectRow {
   scene_json: string;
   workflow_step: number;
   publication_status: "draft" | "published";
+  moderation_status: "clear" | "taken_down";
+  moderation_reason: string;
+  moderated_at: string | null;
+  moderated_by_user_id: string | null;
   owner_user_id: string | null;
   created_at: string;
   updated_at: string;
 }
+
+type ProjectListRow = Omit<ProjectRow, "scene_json"> & {
+  owner_username?: string | null;
+  owner_email?: string | null;
+};
 
 interface AssetRow {
   id: string;
@@ -119,6 +134,36 @@ function projectFromRow(row: ProjectRow) {
     scene: JSON.parse(row.scene_json) as ImmersiveScene,
     workflowStep: row.workflow_step,
     publicationStatus: row.publication_status,
+    moderationStatus: row.moderation_status,
+    moderationReason: row.moderation_reason,
+    moderatedAt: row.moderated_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function projectListItemFromRow(row: ProjectListRow) {
+  return {
+    id: row.id,
+    title: row.title,
+    captureTime: row.capture_time,
+    location: row.location,
+    notes: row.notes,
+    mode: row.mode,
+    originalImageUrl: row.original_image_url,
+    originalThumbnailUrl: row.original_thumbnail_url,
+    panoramaImageUrl: row.panorama_image_url,
+    panoramaThumbnailUrl: row.panorama_thumbnail_url,
+    workflowStep: row.workflow_step,
+    publicationStatus: row.publication_status,
+    moderationStatus: row.moderation_status,
+    moderationReason: row.moderation_reason,
+    moderatedAt: row.moderated_at,
+    owner: row.owner_user_id ? {
+      id: row.owner_user_id,
+      username: row.owner_username ?? "未知用户",
+      email: row.owner_email ?? "",
+    } : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -145,6 +190,18 @@ async function ensureDatabase(env: Env, url: URL) {
   }
   if (!columns.results.some((column) => column.name === "panorama_thumbnail_url")) {
     await db.prepare("ALTER TABLE projects ADD COLUMN panorama_thumbnail_url TEXT NOT NULL DEFAULT ''").run();
+  }
+  if (!columns.results.some((column) => column.name === "moderation_status")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN moderation_status TEXT NOT NULL DEFAULT 'clear'").run();
+  }
+  if (!columns.results.some((column) => column.name === "moderation_reason")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN moderation_reason TEXT NOT NULL DEFAULT ''").run();
+  }
+  if (!columns.results.some((column) => column.name === "moderated_at")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN moderated_at TEXT").run();
+  }
+  if (!columns.results.some((column) => column.name === "moderated_by_user_id")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN moderated_by_user_id TEXT REFERENCES users(id)").run();
   }
   const assetColumns = await db.prepare("PRAGMA table_info(assets)").all<{ name: string }>();
   if (!assetColumns.results.some((column) => column.name === "parent_asset_id")) {
@@ -272,6 +329,22 @@ function imageBytesToDataUrl(bytes: ArrayBuffer, contentType: string) {
   return `data:${contentType.toLowerCase()};base64,${btoa(chunks.join(""))}`;
 }
 
+async function fetchLightCosWithRetry(url: string, init: RequestInit) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      if (response.status < 500 || attempt === 1) return response;
+      await response.body?.cancel().catch(() => undefined);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  throw lastError instanceof Error ? lastError : new Error("LightCOS connection failed");
+}
+
 /** 读取项目私有参考图，供用户自己配置的图片生成 API 使用。 */
 async function generationReferenceToDataUrl(
   env: Env,
@@ -341,10 +414,28 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
   if (url.pathname === "/api/projects" && request.method === "GET") {
     if (!auth) return json({ error: "请先登录。" }, { status: 401 });
     if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
-    const result = await env.DB.prepare(
-      "SELECT * FROM projects WHERE owner_user_id = ? ORDER BY updated_at DESC",
-    ).bind(auth.user.id).all<ProjectRow>();
-    return json({ projects: result.results.map(projectFromRow) });
+    // Project cards do not render scene_json. Avoid transferring every
+    // project's complete projection/source metadata on each Appbar visit.
+    const result = await env.DB.prepare(`
+      SELECT p.id, p.title, p.capture_time, p.location, p.notes, p.mode,
+             p.original_image_url, p.original_thumbnail_url,
+             p.panorama_image_url, p.panorama_thumbnail_url,
+             p.workflow_step, p.publication_status, p.moderation_status,
+             p.moderation_reason, p.moderated_at, p.moderated_by_user_id,
+             p.owner_user_id, p.created_at, p.updated_at,
+             u.username AS owner_username, u.email AS owner_email
+      FROM projects p
+      LEFT JOIN users u ON u.id = p.owner_user_id
+      WHERE (? = 'superadmin' OR p.owner_user_id = ?)
+      ORDER BY p.updated_at DESC
+    `).bind(auth.user.role, auth.user.id).all<ProjectListRow>();
+    return json({
+      projects: result.results.map((row) => ({
+        ...projectListItemFromRow(row),
+        canDelete: row.owner_user_id === auth.user.id,
+      })),
+      scope: auth.user.role === "superadmin" ? "platform" : "own",
+    });
   }
 
   if (url.pathname === "/api/projects" && request.method === "POST") {
@@ -394,6 +485,49 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
     return json({ project: projectFromRow(row!) }, { status: 201 });
   }
 
+  const moderationMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/moderation$/);
+  if (moderationMatch) {
+    if (request.method !== "PUT") return json({ error: "不支持的请求方式。" }, { status: 405 });
+    if (!auth) return json({ error: "请先登录。" }, { status: 401 });
+    if (auth.user.role !== "superadmin") return json({ error: "仅超级管理员可执行项目治理。" }, { status: 403 });
+    if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
+    if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const action = body?.action as ProjectModerationAction | undefined;
+    if (action !== "take_down" && action !== "restore") {
+      return json({ error: "治理操作无效。" }, { status: 400 });
+    }
+    try {
+      const id = decodeURIComponent(moderationMatch[1]);
+      const result = await moderateProject(env.DB, {
+        projectId: id,
+        adminUserId: auth.user.id,
+        action,
+        reason: body?.reason,
+      });
+      if (result.status === "not_found") return json({ error: "项目不存在。" }, { status: 404 });
+      const row = await env.DB.prepare(`
+        SELECT p.id, p.title, p.capture_time, p.location, p.notes, p.mode,
+               p.original_image_url, p.original_thumbnail_url,
+               p.panorama_image_url, p.panorama_thumbnail_url,
+               p.workflow_step, p.publication_status, p.moderation_status,
+               p.moderation_reason, p.moderated_at, p.moderated_by_user_id,
+               p.owner_user_id, p.created_at, p.updated_at,
+               u.username AS owner_username, u.email AS owner_email
+        FROM projects p LEFT JOIN users u ON u.id = p.owner_user_id
+        WHERE p.id = ?
+      `).bind(id).first<ProjectListRow>();
+      return json({
+        project: { ...projectListItemFromRow(row!), canDelete: row!.owner_user_id === auth.user.id },
+      });
+    } catch (error) {
+      if (error instanceof ProjectModerationInputError) {
+        return json({ error: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+  }
+
   const match = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
   if (!match) return json({ error: "接口不存在。" }, { status: 404 });
   const id = decodeURIComponent(match[1]);
@@ -406,10 +540,18 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
     if (auth && row.owner_user_id === auth.user.id && !auth.user.email_verified) {
       return json({ error: "请先验证注册邮箱。" }, { status: 403 });
     }
-    if (row.publication_status !== "published" && (!auth || row.owner_user_id !== auth.user.id)) {
+    if (
+      row.publication_status !== "published" &&
+      (!auth || (row.owner_user_id !== auth.user.id && auth.user.role !== "superadmin"))
+    ) {
       return json({ error: "项目不存在或尚未发布。" }, { status: 404 });
     }
-    return json({ project: projectFromRow(row) });
+    return json({
+      project: {
+        ...projectFromRow(row),
+        canEdit: Boolean(auth && (row.owner_user_id === auth.user.id || auth.user.role === "superadmin")),
+      },
+    });
   }
 
   if (request.method === "PUT") {
@@ -419,11 +561,19 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
     const body = (await request.json()) as Record<string, unknown>;
     const project = normalizedProjectInput(body, id);
     const existing = await env.DB.prepare(
-      "SELECT created_at FROM projects WHERE id = ? AND owner_user_id = ?",
+      `SELECT created_at, moderation_status, owner_user_id FROM projects
+       WHERE id = ? AND (owner_user_id = ? OR ? = 'superadmin')`,
     )
-      .bind(id, auth.user.id)
-      .first<{ created_at: string }>();
+      .bind(id, auth.user.id, auth.user.role)
+      .first<{
+        created_at: string;
+        moderation_status: "clear" | "taken_down";
+        owner_user_id: string | null;
+      }>();
     if (!existing) return json({ error: "项目不存在。" }, { status: 404 });
+    if (project.publicationStatus === "published" && existing.moderation_status === "taken_down") {
+      return json({ error: "该项目已被平台下架，解除下架前不能再次发布。" }, { status: 409 });
+    }
     const now = new Date().toISOString();
     await env.DB.prepare(`
       UPDATE projects SET
@@ -452,7 +602,7 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       .run();
     await linkProjectAssets(
       env.DB,
-      auth.user.id,
+      existing.owner_user_id ?? auth.user.id,
       id,
       [project.originalImageUrl, project.originalThumbnailUrl, project.panoramaImageUrl, project.panoramaThumbnailUrl],
       project.publicationStatus,
@@ -461,6 +611,24 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       .bind(id)
       .first<ProjectRow>();
     return json({ project: projectFromRow(row!) });
+  }
+
+  if (request.method === "DELETE") {
+    if (!auth) return json({ error: "请先登录。" }, { status: 401 });
+    if (!auth.user.email_verified) return json({ error: "请先验证注册邮箱。" }, { status: 403 });
+    if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
+
+    const result = await deleteOwnedProject(env, id, auth.user.id);
+    if (result.status === "not_found") {
+      return json({ error: "项目不存在。" }, { status: 404 });
+    }
+    if (result.status === "busy") {
+      return json({ error: "项目仍有全景生成任务正在运行，请稍后再删除。" }, { status: 409 });
+    }
+    return json({
+      deleted: true,
+      storageCleanupPending: result.storageCleanupPending,
+    });
   }
 
   return json({ error: "不支持的请求方式。" }, { status: 405 });
@@ -502,11 +670,15 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
     }
 
     let projectId = String(body?.projectId ?? "").trim() || null;
+    let assetOwnerUserId = auth.user.id;
     if (projectId) {
       const project = await env.DB.prepare(
-        "SELECT id FROM projects WHERE id = ? AND owner_user_id = ?",
-      ).bind(projectId, auth.user.id).first<{ id: string }>();
-      if (!project) return json({ error: "项目不存在或无权上传素材。" }, { status: 404 });
+        "SELECT id, owner_user_id FROM projects WHERE id = ?",
+      ).bind(projectId).first<{ id: string; owner_user_id: string | null }>();
+      if (!project || (project.owner_user_id !== auth.user.id && auth.user.role !== "superadmin")) {
+        return json({ error: "项目不存在或无权上传素材。" }, { status: 404 });
+      }
+      assetOwnerUserId = project.owner_user_id ?? auth.user.id;
     }
 
     let parentAssetId: string | null = null;
@@ -514,17 +686,23 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       parentAssetId = String(body?.parentAssetId ?? "").trim() || null;
       if (!parentAssetId) return json({ error: "缩略图缺少原始资源关联。" }, { status: 400 });
       const parent = await env.DB.prepare(`
-        SELECT id, project_id FROM assets
-        WHERE id = ? AND owner_user_id = ? AND status = 'ready' AND kind IN ('original', 'panorama')
-      `).bind(parentAssetId, auth.user.id).first<{ id: string; project_id: string | null }>();
-      if (!parent) return json({ error: "缩略图对应的原始资源不存在。" }, { status: 404 });
+        SELECT id, project_id, owner_user_id FROM assets
+        WHERE id = ? AND status = 'ready' AND kind IN ('original', 'panorama')
+      `).bind(parentAssetId).first<{ id: string; project_id: string | null; owner_user_id: string }>();
+      if (!parent || (parent.owner_user_id !== auth.user.id && auth.user.role !== "superadmin")) {
+        return json({ error: "缩略图对应的原始资源不存在。" }, { status: 404 });
+      }
+      if (projectId && parent.project_id && parent.project_id !== projectId) {
+        return json({ error: "缩略图与原始资源不属于同一项目。" }, { status: 400 });
+      }
       if (!projectId) projectId = parent.project_id;
+      assetOwnerUserId = parent.owner_user_id;
     }
 
     const assetId = crypto.randomUUID();
     const bucket = lightCosBucketForKind(config, kind);
     const projectSegment = projectId ?? "unassigned";
-    const objectKey = `users/${auth.user.id}/projects/${projectSegment}/${kind}/${assetId}${extension}`;
+    const objectKey = `users/${assetOwnerUserId}/projects/${projectSegment}/${kind}/${assetId}${extension}`;
     const originalFilename = String(body?.filename ?? "image").trim().slice(0, 240) || `image${extension}`;
     const now = new Date().toISOString();
     await env.DB.prepare(`
@@ -537,7 +715,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       assetId,
       projectId,
       parentAssetId,
-      auth.user.id,
+      assetOwnerUserId,
       kind,
       bucket,
       config.region,
@@ -566,10 +744,11 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
     if (auth.user.must_change_password) return json({ error: "请先修改临时密码。" }, { status: 403 });
     if (!requireCsrf(request, auth)) return json({ error: "安全校验失败。" }, { status: 403 });
     const assetId = decodeURIComponent(contentMatch[1]);
-    const asset = await env.DB.prepare(
-      "SELECT * FROM assets WHERE id = ? AND owner_user_id = ?",
-    ).bind(assetId, auth.user.id).first<AssetRow>();
-    if (!asset) return json({ error: "上传记录不存在。" }, { status: 404 });
+    const asset = await env.DB.prepare("SELECT * FROM assets WHERE id = ?")
+      .bind(assetId).first<AssetRow>();
+    if (!asset || (asset.owner_user_id !== auth.user.id && auth.user.role !== "superadmin")) {
+      return json({ error: "上传记录不存在。" }, { status: 404 });
+    }
     if (asset.status !== "pending") return json({ error: "该上传任务已经结束。" }, { status: 409 });
 
     const contentType = String(request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
@@ -645,6 +824,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       const auth = await getAuth(request, env.DB);
       const canRead =
         auth?.user.id === asset.owner_user_id ||
+        auth?.user.role === "superadmin" ||
         asset.visibility === "published" ||
         asset.project_publication_status === "published";
       if (!canRead || asset.status !== "ready") return new Response("Not found", { status: 404 });
@@ -657,19 +837,33 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
         key: asset.object_key,
         expiresInSeconds: 5 * 60,
       });
-      const remote = await fetch(lightCosRequestUrl(config, signedUrl), { method: "GET" });
-      if (!remote.ok || !remote.body) {
-        return new Response("LightCOS object unavailable", { status: 502 });
+      let remote: Response;
+      try {
+        remote = await fetchLightCosWithRetry(lightCosRequestUrl(config, signedUrl), { method: "GET" });
+      } catch {
+        return new Response("LightCOS connection unavailable", {
+          status: 502,
+          headers: { "cache-control": "no-store" },
+        });
       }
+      if (!remote.ok || !remote.body) {
+        return new Response("LightCOS object unavailable", {
+          status: 502,
+          headers: { "cache-control": "no-store" },
+        });
+      }
+      const isPublicAsset = canRead && auth?.user.id !== asset.owner_user_id;
       return new Response(remote.body, {
         status: remote.status,
         headers: {
           "content-type": remote.headers.get("content-type") ?? asset.content_type,
           "content-length": remote.headers.get("content-length") ?? String(asset.byte_size),
           etag: remote.headers.get("etag") ?? asset.etag,
-          "cache-control": canRead && auth?.user.id !== asset.owner_user_id
+          "cache-control": isPublicAsset
             ? "public, max-age=3600"
-            : "private, no-store",
+            : asset.kind === "thumbnail"
+              ? "private, max-age=3600"
+              : "private, no-store",
         },
       });
     }

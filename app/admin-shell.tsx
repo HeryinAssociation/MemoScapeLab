@@ -3,14 +3,16 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { authenticatedFetch, getCurrentAuth, setCurrentAuth, type CurrentUser } from "@/src/auth/client";
+import { BrandMark } from "./brand-art";
+import { OnboardingGuide } from "./onboarding-guide";
 
 type AdminSection = "projects" | "work" | "about" | "user" | "users" | "imagegen";
 
 const NAV_ITEMS = [
-  { key: "home", label: "主页", symbol: "⌂", href: "", disabled: true },
-  { key: "projects", label: "项目", symbol: "▦", href: "/proj", disabled: false },
-  { key: "work", label: "工作台", symbol: "◎", href: "/work", disabled: false },
-  { key: "imagegen", label: "生成设置", symbol: "✧", href: "/imagegen", disabled: false },
+  { key: "home", label: "主页", symbol: "⌂", href: "http://localhost:3100/", external: true },
+  { key: "projects", label: "项目", symbol: "▦", href: "/proj", external: false },
+  { key: "work", label: "工作台", symbol: "◎", href: "/work", external: false },
+  { key: "imagegen", label: "生成", symbol: "✧", href: "/imagegen", external: false },
 ] as const;
 
 const ABOUT_ITEM = {
@@ -18,7 +20,7 @@ const ABOUT_ITEM = {
   label: "关于",
   symbol: "i",
   href: "/about",
-  disabled: false,
+  external: false,
 } as const;
 
 export function AdminShell({
@@ -30,13 +32,28 @@ export function AdminShell({
 }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [navigating, setNavigating] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const autoOpenedGuide = useRef(false);
 
   useEffect(() => {
     getCurrentAuth()
       .then((auth) => setUser(auth.user))
       .catch(() => window.location.assign("/login"));
   }, []);
+
+  useEffect(() => {
+    if (
+      active === "projects"
+      && user?.emailVerified
+      && !user.onboardingCompleted
+      && !autoOpenedGuide.current
+    ) {
+      autoOpenedGuide.current = true;
+      setGuideOpen(true);
+    }
+  }, [active, user]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -58,10 +75,28 @@ export function AdminShell({
     }
   };
 
+  const completeGuide = async (startProject = false) => {
+    setGuideOpen(false);
+    if (user && !user.onboardingCompleted) {
+      const nextUser = { ...user, onboardingCompleted: true };
+      setUser(nextUser);
+      try {
+        const response = await authenticatedFetch("/api/users/me/onboarding", { method: "POST" });
+        if (response.ok) {
+          const auth = await getCurrentAuth();
+          setCurrentAuth({ ...auth, user: nextUser });
+        }
+      } catch {
+        // The guide remains dismissed for this visit; the server can retry next session.
+      }
+    }
+    if (startProject) window.location.assign("/work");
+  };
+
   const navItems = user?.role === "superadmin"
     ? [
         ...NAV_ITEMS,
-        { key: "users", label: "用户管理", symbol: "♙", href: "/usradmin", disabled: false } as const,
+        { key: "users", label: "用户管理", symbol: "♙", href: "/usradmin", external: false } as const,
         ABOUT_ITEM,
       ]
     : [...NAV_ITEMS, ABOUT_ITEM];
@@ -70,28 +105,45 @@ export function AdminShell({
     <div className="admin-shell">
       <aside className="admin-appbar" aria-label="管理后台导航">
         <Link className="admin-logo" href="/proj" aria-label="MemoscapeLab 项目">
-          ML
+          <BrandMark tone="on-dark" />
         </Link>
         <nav>
-          {navItems.map((item) =>
-            item.disabled ? (
-              <span className="admin-nav-item is-disabled" key={item.key} aria-disabled="true">
+          {navItems.map((item) => {
+            const content = (
+              <>
                 <b aria-hidden="true">{item.symbol}</b>
                 <small>{item.label}</small>
-                <em>待开放</em>
-              </span>
-            ) : (
-              <Link
-                className={`admin-nav-item ${active === item.key ? "is-active" : ""}`}
+              </>
+            );
+            const className = [
+              "admin-nav-item",
+              active === item.key ? "is-active" : "",
+              navigating === item.key ? "is-navigating" : "",
+            ].filter(Boolean).join(" ");
+            return item.external ? (
+              <a
+                className={className}
                 href={item.href}
                 key={item.key}
+                onClick={() => setNavigating(item.key)}
               >
-                <b aria-hidden="true">{item.symbol}</b>
-                <small>{item.label}</small>
+                {content}
+              </a>
+            ) : (
+              <Link
+                className={className}
+                href={item.href}
+                key={item.key}
+                prefetch
+                aria-current={active === item.key ? "page" : undefined}
+                onClick={() => setNavigating(item.key)}
+              >
+                {content}
               </Link>
-            ),
-          )}
+            );
+          })}
         </nav>
+        {navigating && <span className="admin-navigation-progress" role="status" aria-label="正在切换页面"><i /></span>}
         <div className="admin-profile-wrap" ref={menuRef}>
           {menuOpen && (
             <div className="admin-profile-menu" role="menu">
@@ -99,6 +151,7 @@ export function AdminShell({
                 <strong>{user?.username ?? "正在读取"}</strong>
                 <small>{user?.email ?? ""}</small>
               </div>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setGuideOpen(true); }}>重看新手引导</button>
               <Link href="/usr" role="menuitem" onClick={() => setMenuOpen(false)}>用户设置</Link>
               <button type="button" role="menuitem" onClick={logout}>登出</button>
             </div>
@@ -116,6 +169,7 @@ export function AdminShell({
         </div>
       </aside>
       <div className="admin-content">{children}</div>
+      {guideOpen && user && <OnboardingGuide username={user.username} onComplete={completeGuide} />}
     </div>
   );
 }

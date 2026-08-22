@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { BrandMark } from "./brand-art";
 import { renderScene, type RenderHandle } from "@/src/core/render-router";
 import {
   isAdaptiveProjection,
@@ -123,7 +124,7 @@ export function ViewerApp({
     <main className={`project-viewer ${embedded ? "is-embedded" : ""}`}>
       {!embedded && <header className="project-viewer-bar">
         <div>
-          <span className="viewer-brand-mark">ML</span>
+          <BrandMark className="viewer-brand-mark" />
           <span>
             <small>{embedded ? "PUBLISH PREVIEW" : "PROJECT VIEWER"}</small>
             <strong>{project?.title ?? "正在读取项目"}</strong>

@@ -5,7 +5,7 @@ import openapiDocument from "../docs/public-api-openapi.json";
 
 export interface PublicApiEnv {
   DB: D1Database;
-  /** Bearer API Key；未配置时 /api/v1 数据接口返回 503。 */
+  /** 已发布项目列表的 Bearer API Key；单项目公开详情不使用该密钥。 */
   READ_API_KEY?: string;
   /** 允许的跨域来源，多个用英文逗号分隔；未配置时浏览器跨域不可用（服务端调用不受影响）。 */
   PUBLIC_API_ALLOWED_ORIGIN?: string;
@@ -28,6 +28,13 @@ interface ProjectRow {
   owner_user_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface ProjectSummaryRow extends ProjectRow {
+  author_username: string | null;
+  author_avatar_key: string | null;
+  author_created_at: string | null;
+  author_updated_at: string | null;
 }
 
 interface AssetRow {
@@ -123,7 +130,7 @@ function sceneToAbsolute(scene: ImmersiveScene, origin: string): ImmersiveScene 
 }
 
 /** 列表卡片所需的最小字段。 */
-function projectSummary(row: ProjectRow, origin: string) {
+function projectSummary(row: ProjectSummaryRow, origin: string) {
   return {
     id: row.id,
     title: row.title,
@@ -142,6 +149,26 @@ function projectSummary(row: ProjectRow, origin: string) {
     ),
     originalImageUrl: absoluteUrl(origin, row.original_image_url),
     panoramaImageUrl: absoluteUrl(origin, row.panorama_image_url),
+    author: row.author_username
+      ? {
+          username: row.author_username,
+          avatar: row.author_avatar_key && row.owner_user_id
+            ? `${origin}/api/users/${encodeURIComponent(row.owner_user_id)}/avatar?v=${encodeURIComponent(row.author_updated_at ?? "")}`
+            : "",
+          createdAt: row.author_created_at ?? "",
+        }
+      : null,
+  };
+}
+
+/** 单个已发布项目属于公开资源，允许任意站点读取其 JSON。 */
+function publishedProjectCorsHeaders(request: Request): HeadersInit | null {
+  if (!request.headers.get("origin")) return null;
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "Content-Type",
+    "access-control-max-age": "86400",
   };
 }
 
@@ -168,13 +195,13 @@ async function listProjects(env: PublicApiEnv, url: URL, origin: string) {
     ? Math.min(LIST_MAX_LIMIT, Math.floor(rawLimit))
     : LIST_DEFAULT_LIMIT;
   const mode = url.searchParams.get("mode") ?? "";
-  const where: string[] = ["publication_status = 'published'"];
+  const where: string[] = ["projects.publication_status = 'published'"];
   const params: unknown[] = [];
   if (mode) {
     if (!SCENE_MODES.includes(mode as SceneMode)) {
       return json({ error: "mode 参数无效。" }, { status: 400 });
     }
-    where.push("mode = ?");
+    where.push("projects.mode = ?");
     params.push(mode);
   }
   const clause = `WHERE ${where.join(" AND ")}`;
@@ -183,10 +210,18 @@ async function listProjects(env: PublicApiEnv, url: URL, origin: string) {
     .first<{ total: number }>();
   const total = Number(count?.total ?? 0);
   const rows = await env.DB.prepare(
-    `SELECT * FROM projects ${clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+    `SELECT projects.*,
+       users.username AS author_username,
+       users.avatar_key AS author_avatar_key,
+       users.created_at AS author_created_at,
+       users.updated_at AS author_updated_at
+     FROM projects
+     LEFT JOIN users ON users.id = projects.owner_user_id
+     ${clause}
+     ORDER BY projects.updated_at DESC LIMIT ? OFFSET ?`,
   )
     .bind(...params, limit, (page - 1) * limit)
-    .all<ProjectRow>();
+    .all<ProjectSummaryRow>();
   return json({
     projects: rows.results.map((row) => projectSummary(row, origin)),
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
@@ -319,12 +354,18 @@ const SWAGGER_UI_HTML = `<!doctype html>
 </html>`;
 
 /**
- * /api/v1 入口：OpenAPI 文档与 Swagger UI 免 Key（仅暴露接口契约，不含数据），
- * 其余数据接口要求 Authorization: Bearer <READ_API_KEY>。
+ * /api/v1 入口：文档、已发布项目详情与资产清单免 Key；
+ * 聚合列表仍要求 Authorization: Bearer <READ_API_KEY>。
  */
 export async function handlePublicApi(request: Request, env: PublicApiEnv, url: URL): Promise<Response> {
   const configuredKey = (env.READ_API_KEY ?? "").trim();
-  const cors = corsHeaders(request, env);
+  const origin = new URL(request.url).origin;
+  const assetsMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/assets$/);
+  const projectMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
+  const isPublishedProjectEndpoint = Boolean(assetsMatch || projectMatch);
+  const cors = isPublishedProjectEndpoint
+    ? publishedProjectCorsHeaders(request)
+    : corsHeaders(request, env);
 
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -350,6 +391,18 @@ export async function handlePublicApi(request: Request, env: PublicApiEnv, url: 
     }), cors);
   }
 
+  // 发布即开放：单个已发布项目及其资产清单无需全局 READ_API_KEY。
+  // 查询函数自身只接受 publication_status='published'，草稿仍统一返回 404。
+  if (isPublishedProjectEndpoint) {
+    if (request.method !== "GET") {
+      return withCors(json({ error: "仅支持 GET 请求。" }, { status: 405 }), cors);
+    }
+    if (assetsMatch) {
+      return withCors(await listProjectAssets(env, decodeURIComponent(assetsMatch[1]), origin), cors);
+    }
+    return withCors(await projectDetail(env, decodeURIComponent(projectMatch![1]), origin), cors);
+  }
+
   if (!configuredKey) {
     return withCors(json({ error: "对外 API 未启用（缺少 READ_API_KEY）。" }, { status: 503 }), cors);
   }
@@ -361,18 +414,8 @@ export async function handlePublicApi(request: Request, env: PublicApiEnv, url: 
     return withCors(json({ error: "仅支持 GET 请求。" }, { status: 405 }), cors);
   }
 
-  const origin = new URL(request.url).origin;
-
   if (url.pathname === "/api/v1/projects" && request.method === "GET") {
     return withCors(await listProjects(env, url, origin), cors);
-  }
-  const assetsMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/assets$/);
-  if (assetsMatch) {
-    return withCors(await listProjectAssets(env, decodeURIComponent(assetsMatch[1]), origin), cors);
-  }
-  const projectMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
-  if (projectMatch) {
-    return withCors(await projectDetail(env, decodeURIComponent(projectMatch[1]), origin), cors);
   }
   return withCors(json({ error: "接口不存在。" }, { status: 404 }), cors);
 }

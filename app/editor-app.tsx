@@ -8,6 +8,7 @@ import {
   type ChangeEvent,
   type ReactNode,
 } from "react";
+import { BrandMark } from "./brand-art";
 import {
   DEFAULT_ADAPTIVE_PROJECTION,
   isAdaptiveProjection,
@@ -74,6 +75,7 @@ const SAMPLE_IMAGES = [
 
 type PreviewDevice = "desktop" | "tablet" | "mobile";
 type EditorStatus = "loading" | "ready" | "error";
+type SaveFeedback = "idle" | "saving" | "saved" | "error";
 
 interface EditorAppProps {
   initialScene?: ImmersiveScene;
@@ -202,9 +204,15 @@ export function EditorApp({
     handle: RenderHandle;
   } | null>(null);
   const latestSceneRef = useRef(startingScene);
+  const liveViewRef = useRef<AdaptiveViewState>({
+    yaw: startingScene.view.yaw,
+    pitch: startingScene.view.pitch,
+    hfov: startingScene.view.hfov,
+  });
   const objectUrlRef = useRef<string | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const saveFeedbackTimerRef = useRef<number | null>(null);
 
   const [scene, setScene] = useState<ImmersiveScene>(startingScene);
   const [exportSource, setExportSource] = useState(startingScene.source);
@@ -219,11 +227,17 @@ export function EditorApp({
   });
   const [notice, setNotice] = useState("所有参数修改会立即反映在预览中");
   const [originalPreviewOpen, setOriginalPreviewOpen] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<SaveFeedback>("idle");
 
   const identity = `${scene.mode}:${scene.source}`;
   const isAdaptive =
     scene.mode === "curvedPhoto" || scene.mode === "flatPhoto";
   const projection = adaptiveProjection(scene);
+
+  const handleLiveViewChange = (view: AdaptiveViewState) => {
+    liveViewRef.current = view;
+    setLiveView(view);
+  };
 
   useEffect(() => {
     latestSceneRef.current = scene;
@@ -236,7 +250,7 @@ export function EditorApp({
     setStatus("loading");
     setStatusMessage("正在建立实时预览");
 
-    renderScene(target, scene, { onViewChange: setLiveView })
+    renderScene(target, scene, { onViewChange: handleLiveViewChange })
       .then((handle) => {
         if (cancelled) {
           handle.destroy();
@@ -294,6 +308,7 @@ export function EditorApp({
   useEffect(
     () => () => {
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      if (saveFeedbackTimerRef.current) window.clearTimeout(saveFeedbackTimerRef.current);
     },
     [],
   );
@@ -317,6 +332,9 @@ export function EditorApp({
   };
 
   const updateView = (key: keyof ViewConfig, value: number) => {
+    if (key === "yaw" || key === "pitch" || key === "hfov") {
+      liveViewRef.current = { ...liveViewRef.current, [key]: value };
+    }
     setScene((current) => ({
       ...current,
       view: { ...current.view, [key]: value },
@@ -328,7 +346,8 @@ export function EditorApp({
       scene.view.maxHfov,
       Math.max(scene.view.minHfov, scene.view.hfov + difference),
     );
-    setLiveView((view) => ({ ...view, hfov }));
+    liveViewRef.current = { ...liveViewRef.current, hfov };
+    setLiveView(liveViewRef.current);
     setScene((current) => ({
       ...current,
       view: { ...current.view, hfov },
@@ -484,19 +503,47 @@ export function EditorApp({
   };
 
   const saveDraft = async () => {
+    if (saveFeedback === "saving") return;
+    if (saveFeedbackTimerRef.current) window.clearTimeout(saveFeedbackTimerRef.current);
+    setSaveFeedback("saving");
     if (onSave) {
       try {
         setNotice("正在保存项目参数");
-        await onSave(scene);
-        setNotice("项目参数已保存到数据库");
+        const sceneToSave = {
+          ...scene,
+          view: { ...scene.view, ...liveViewRef.current },
+        };
+        await onSave(sceneToSave);
+        setScene(sceneToSave);
+        setNotice("投影参数已保存");
+        setSaveFeedback("saved");
+        saveFeedbackTimerRef.current = window.setTimeout(() => setSaveFeedback("idle"), 4000);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "项目参数保存失败");
+        setSaveFeedback("error");
+        saveFeedbackTimerRef.current = window.setTimeout(() => setSaveFeedback("idle"), 6000);
       }
       return;
     }
-    localStorage.setItem("memoscape-lab-editor-draft", exportJson);
-    setNotice("草稿已保存在当前设备");
+    try {
+      localStorage.setItem("memoscape-lab-editor-draft", exportJson);
+      setNotice("草稿已保存");
+      setSaveFeedback("saved");
+      saveFeedbackTimerRef.current = window.setTimeout(() => setSaveFeedback("idle"), 4000);
+    } catch {
+      setNotice("草稿保存失败");
+      setSaveFeedback("error");
+      saveFeedbackTimerRef.current = window.setTimeout(() => setSaveFeedback("idle"), 6000);
+    }
   };
+
+  const saveButtonLabel = saveFeedback === "saving"
+    ? "保存中…"
+    : saveFeedback === "saved"
+      ? "✓ 已保存"
+      : onSave
+        ? "保存项目"
+        : "保存草稿";
 
   const restoreDraft = () => {
     const draft = localStorage.getItem("memoscape-lab-editor-draft")
@@ -534,9 +581,7 @@ export function EditorApp({
     <main className={`editor-shell ${embedded ? "editor-embedded" : ""}`}>
       <header className="editor-header">
         <div className="editor-brand">
-          <span className="brand-mark" aria-hidden="true">
-            ML
-          </span>
+          <BrandMark className="brand-mark" tone="on-dark" />
           <span>
             <strong>MemoscapeLab</strong>
             <small>投影调参工作台 / EDITOR 02</small>
@@ -550,9 +595,11 @@ export function EditorApp({
           <button
             className="primary-action"
             type="button"
+            disabled={saveFeedback === "saving"}
+            aria-busy={saveFeedback === "saving"}
             onClick={() => void saveDraft()}
           >
-            {onSave ? "保存项目" : "保存草稿"}
+            {saveButtonLabel}
           </button>
         </div>
       </header>
@@ -1040,13 +1087,32 @@ export function EditorApp({
             <button
               type="button"
               className="primary-action"
+              disabled={saveFeedback === "saving"}
+              aria-busy={saveFeedback === "saving"}
               onClick={() => void saveDraft()}
             >
-              {onSave ? "保存项目" : "保存草稿"}
+              {saveButtonLabel}
             </button>
           </div>
         </aside>
       </section>
+      {saveFeedback !== "idle" && (
+        <div
+          className={`editor-save-feedback is-${saveFeedback}`}
+          role={saveFeedback === "error" ? "alert" : "status"}
+          aria-live="assertive"
+        >
+          <b aria-hidden="true">
+            {saveFeedback === "saving" ? "···" : saveFeedback === "saved" ? "✓" : "!"}
+          </b>
+          <span>
+            <strong>
+              {saveFeedback === "saving" ? "正在保存" : saveFeedback === "saved" ? "保存成功" : "保存失败"}
+            </strong>
+            <small>{saveFeedback === "error" ? notice : saveFeedback === "saved" ? "投影参数已写入项目" : "请稍候"}</small>
+          </span>
+        </div>
+      )}
       {embedded && originalPreviewOpen && originalImageUrl && (
         <div
           className="original-photo-lightbox"

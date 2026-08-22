@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "MemoScapeLab 对外只读 API",
-    "description": "供展示项目获取已发布照片项目的完整数据：历史原图/缩略图、全景图/缩略图、图片元数据、照片历史信息、投影渲染参数、作者信息与时间戳。\n\n鉴权：数据接口要求请求头 `Authorization: Bearer <READ_API_KEY>`（单个固定密钥）。未发布（draft）项目一律不可见。\n\n时间戳说明：`captureTime` 是自由文本历史标注（如“1991 年夏”），不是 ISO 时间戳；ISO 时间戳只有 `createdAt` / `updatedAt` / `startedAt` / `finishedAt`。\n\n图片说明：`thumbnailUrl` 可能为空串（AI 生成缩略图失败时），应回退到对应的原图 URL；AI 生成的全景图与服务端缩略图在 R2，无 assets 行，尺寸字段为 null，只通过项目详情的 URL 字段暴露。",
+    "description": "供展示项目获取已发布照片项目的完整数据：历史原图/缩略图、全景图/缩略图、图片元数据、照片历史信息、投影渲染参数、作者信息与时间戳。\n\n鉴权：项目列表要求请求头 `Authorization: Bearer <READ_API_KEY>`；单个已发布项目详情及其资产清单免密公开。未发布（draft）项目一律返回 404。\n\n时间戳说明：`captureTime` 是自由文本历史标注（如“1991 年夏”），不是 ISO 时间戳；ISO 时间戳只有 `createdAt` / `updatedAt` / `startedAt` / `finishedAt`。\n\n图片说明：`thumbnailUrl` 可能为空串（AI 生成缩略图失败时），应回退到对应的原图 URL；AI 生成的全景图与服务端缩略图在 R2，无 assets 行，尺寸字段为 null，只通过项目详情的 URL 字段暴露。",
     "version": "0.1.0"
   },
   "servers": [
@@ -68,7 +68,7 @@
         "tags": ["项目"],
         "summary": "已发布项目详情",
         "description": "返回单个已发布项目的聚合数据：历史信息、四张图 URL、投影/视角参数、热点、资产元数据、作者与 AI 生成溯源。",
-        "security": [{ "apiKey": [] }],
+        "security": [],
         "parameters": [
           { "name": "id", "in": "path", "required": true, "description": "项目 ID", "schema": { "type": "string" } }
         ],
@@ -85,9 +85,8 @@
               }
             }
           },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
-          "503": { "$ref": "#/components/responses/NotConfigured" }
+          "405": { "description": "仅支持 GET 请求" }
         }
       }
     },
@@ -96,7 +95,7 @@
         "tags": ["资产"],
         "summary": "项目的图片资产列表",
         "description": "仅返回已发布项目中 status 为 ready 的 LightCOS 资产（original / panorama / thumbnail）。AI 生成全景及其服务端缩略图在 R2、无 assets 行，不在此列表，请使用项目详情的 URL 字段。",
-        "security": [{ "apiKey": [] }],
+        "security": [],
         "parameters": [
           { "name": "id", "in": "path", "required": true, "description": "项目 ID", "schema": { "type": "string" } }
         ],
@@ -113,9 +112,8 @@
               }
             }
           },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
-          "503": { "$ref": "#/components/responses/NotConfigured" }
+          "405": { "description": "仅支持 GET 请求" }
         }
       }
     },
@@ -217,7 +215,7 @@
       },
       "ProjectSummary": {
         "type": "object",
-        "required": ["id", "title", "mode", "publicationStatus", "createdAt", "updatedAt"],
+        "required": ["id", "title", "mode", "publicationStatus", "createdAt", "updatedAt", "author"],
         "properties": {
           "id": { "type": "string" },
           "title": { "type": "string" },
@@ -229,7 +227,16 @@
           "updatedAt": { "type": "string", "format": "date-time" },
           "coverUrl": { "type": "string", "description": "卡片封面：优先全景缩略图，逐级回退到原图", "format": "uri" },
           "originalImageUrl": { "type": "string", "format": "uri" },
-          "panoramaImageUrl": { "type": "string", "format": "uri" }
+          "panoramaImageUrl": { "type": "string", "format": "uri" },
+          "author": {
+            "type": ["object", "null"],
+            "description": "卡片展示所需的公开作者摘要，不包含邮箱、手机号等隐私字段",
+            "properties": {
+              "username": { "type": "string" },
+              "avatar": { "type": "string", "format": "uri", "description": "可能为空串" },
+              "createdAt": { "type": "string", "format": "date-time" }
+            }
+          }
         }
       },
       "ProjectDetail": {

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'user',
   status TEXT NOT NULL DEFAULT 'active',
   must_change_password INTEGER NOT NULL DEFAULT 0,
+  onboarding_completed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   banned_at TEXT
@@ -68,6 +69,10 @@ CREATE TABLE IF NOT EXISTS projects (
   scene_json TEXT NOT NULL,
   workflow_step INTEGER NOT NULL DEFAULT 1,
   publication_status TEXT NOT NULL DEFAULT 'draft',
+  moderation_status TEXT NOT NULL DEFAULT 'clear',
+  moderation_reason TEXT NOT NULL DEFAULT '',
+  moderated_at TEXT,
+  moderated_by_user_id TEXT REFERENCES users(id),
   owner_user_id TEXT REFERENCES users(id),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

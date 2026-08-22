@@ -9,7 +9,11 @@ import {
   isPartialSphereProjection,
   type ImmersiveScene,
 } from "@/src/core/projection-types";
-import { MODE_LABELS, type PanoramaProject } from "@/src/projects/types";
+import {
+  MODE_LABELS,
+  type PanoramaProject,
+  type PublicationStatus,
+} from "@/src/projects/types";
 import { authenticatedFetch } from "@/src/auth/client";
 import { createWebpThumbnail } from "@/src/images/client-thumbnail";
 import type { ImageGenProviderName } from "@/worker/image-gen/types";
@@ -57,6 +61,9 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
   const [genProvider, setGenProvider] = useState<ImageGenProviderName | "">("");
   const pollTimerRef = useRef<number | null>(null);
   const [uploading, setUploading] = useState<UploadKind | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -73,7 +80,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
           setNotes(loaded.notes);
           setStep(Math.min(4, Math.max(1, loaded.workflowStep)));
           setLoadState("ready");
-          setMessage("项目已载入");
+          setMessage(loaded.canEdit === false ? "管理员审核预览 · 只读" : "项目已载入");
         })
         .catch((error: unknown) => {
           if (error instanceof DOMException && error.name === "AbortError") return;
@@ -100,6 +107,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     panoramaThumbnailUrl?: string;
     scene?: ImmersiveScene;
     workflowStep?: number;
+    publicationStatus?: PublicationStatus;
   }) => {
     const scene = options.scene ?? project?.scene ?? INITIAL_SCENE;
     const body = {
@@ -107,14 +115,14 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
       captureTime,
       location,
       notes,
-      mode: project?.mode ?? "curvedPhoto",
+      mode: scene.mode,
       originalImageUrl: options.originalImageUrl ?? project?.originalImageUrl ?? "",
       originalThumbnailUrl: options.originalThumbnailUrl ?? project?.originalThumbnailUrl ?? "",
       panoramaImageUrl: options.panoramaImageUrl ?? project?.panoramaImageUrl ?? "",
       panoramaThumbnailUrl: options.panoramaThumbnailUrl ?? project?.panoramaThumbnailUrl ?? "",
       scene,
       workflowStep: options.workflowStep ?? step,
-      publicationStatus: project?.publicationStatus ?? "draft",
+      publicationStatus: options.publicationStatus ?? project?.publicationStatus ?? "draft",
     };
     const response = project
       ? await authenticatedFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
@@ -330,10 +338,57 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
 
   const saveScene = async (scene: ImmersiveScene) => {
     await saveProject({ scene, workflowStep: 3 });
-    setMessage("投影参数已保存到数据库");
+    setMessage("投影参数已保存");
+  };
+
+  const updatePublicationStatus = async (publicationStatus: PublicationStatus) => {
+    if (!project) return;
+    setPublishing(true);
+    try {
+      await saveProject({ publicationStatus, workflowStep: 4 });
+      setStep(4);
+      setMessage(publicationStatus === "published" ? "项目已发布" : "项目已撤回");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "发布状态更新失败");
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const copyPublicApiUrl = async () => {
+    if (!project) return;
+    try {
+      const path = `/api/v1/projects/${encodeURIComponent(project.id)}`;
+      await navigator.clipboard.writeText(new URL(path, window.location.origin).toString());
+      setMessage("项目 API 地址已复制");
+    } catch {
+      setMessage("浏览器未允许复制，请手动选择 API 地址");
+    }
+  };
+
+  const deleteCurrentProject = async () => {
+    if (!project || deletingProject) return;
+    setDeletingProject(true);
+    try {
+      const response = await authenticatedFetch(
+        `/api/projects/${encodeURIComponent(project.id)}`,
+        { method: "DELETE" },
+      );
+      const payload = (await response.json()) as { deleted?: boolean; error?: string };
+      if (!response.ok || !payload.deleted) {
+        throw new Error(payload.error ?? "项目删除失败");
+      }
+      window.location.assign("/proj");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "项目删除失败");
+      setDeletingProject(false);
+      setDeleteDialogOpen(false);
+    }
   };
 
   const cover = project?.panoramaThumbnailUrl || project?.originalThumbnailUrl || project?.panoramaImageUrl || project?.originalImageUrl;
+  const isTakenDown = project?.moderationStatus === "taken_down";
+  const canEdit = project?.canEdit !== false;
 
   return (
     <main className="workbench-page">
@@ -571,7 +626,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
             <div className="publish-copy">
               <span className="eyebrow">PUBLISH PREVIEW</span>
               <h2>{project.title}</h2>
-              <p>在工作台内检查最终浏览效果。左侧预览可切换为全屏，不会跳转到单独页面。</p>
+              <p>检查最终浏览效果。</p>
 
               <h3>照片元数据</h3>
               <dl className="publish-status-list">
@@ -604,10 +659,86 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                 <strong>文字备注</strong>
                 <p>{project.notes || "暂无文字备注。"}</p>
               </div>
+
+              <div className={`publish-release-panel ${isTakenDown ? "is-taken-down" : `is-${project.publicationStatus}`}`}>
+                <div className="publish-release-heading">
+                  <span>
+                    <small>PUBLICATION</small>
+                    <strong>{isTakenDown ? "已被平台下架" : project.publicationStatus === "published" ? "已发布" : "未发布"}</strong>
+                  </span>
+                  <i aria-hidden="true" />
+                </div>
+                {isTakenDown && (
+                  <div className="publish-moderation-notice">
+                    <strong>下架原因</strong>
+                    <p>{project.moderationReason || "平台未记录具体原因，请联系管理员。"}</p>
+                  </div>
+                )}
+                {project.publicationStatus === "published" && (
+                  <div className="publish-api-address">
+                    <code>{`/api/v1/projects/${project.id}`}</code>
+                    <button type="button" onClick={() => void copyPublicApiUrl()}>复制地址</button>
+                    <a
+                      href={`/api/v1/projects/${encodeURIComponent(project.id)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >打开 API</a>
+                  </div>
+                )}
+                <div className="publish-release-actions">
+                  <button
+                    type="button"
+                    disabled={publishing || !canEdit || isTakenDown || project.publicationStatus === "published"}
+                    onClick={() => void updatePublicationStatus("published")}
+                  >
+                    {publishing ? "正在发布…" : isTakenDown ? "项目已下架" : !canEdit ? "只读审核" : project.publicationStatus === "published" ? "项目已发布" : "发布项目"}
+                  </button>
+                  {project.publicationStatus === "published" && (
+                    <button
+                      className="text-button"
+                      type="button"
+                      disabled={publishing || !canEdit}
+                      onClick={() => void updatePublicationStatus("draft")}
+                    >撤回发布</button>
+                  )}
+                  <button
+                    className="delete-button"
+                    type="button"
+                    disabled={publishing || !canEdit}
+                    onClick={() => setDeleteDialogOpen(true)}
+                  >删除项目</button>
+                </div>
+              </div>
             </div>
           </div>
         )}
       </section>
+
+      {deleteDialogOpen && project && (
+        <div className="project-delete-modal" role="presentation">
+          <div
+            className="project-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="workbench-delete-project-title"
+            aria-describedby="workbench-delete-project-description"
+          >
+            <small>PERMANENT DELETE</small>
+            <h2 id="workbench-delete-project-title">永久删除“{project.title}”？</h2>
+            <p id="workbench-delete-project-description">
+              项目档案、生成记录和关联图片会一并永久删除。此操作无法撤销。
+            </p>
+            <div>
+              <button type="button" disabled={deletingProject} onClick={() => setDeleteDialogOpen(false)}>
+                取消
+              </button>
+              <button className="is-danger" type="button" disabled={deletingProject} onClick={() => void deleteCurrentProject()}>
+                {deletingProject ? "正在删除…" : "确认永久删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

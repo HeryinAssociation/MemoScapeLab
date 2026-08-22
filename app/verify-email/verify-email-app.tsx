@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { authenticatedFetch, getCurrentAuth, setCurrentAuth } from "@/src/auth/client";
+import { BrandLockup } from "../brand-art";
 
 type VerificationState = "form" | "loading" | "success" | "error";
 
@@ -116,7 +117,7 @@ export function VerifyEmailApp() {
 
   return (
     <main className="auth-page auth-verify-page">
-      <section className="auth-visual" aria-hidden="true"><div className="auth-brand"><span>ML</span><div><strong>MEMOSCAPELAB</strong><small>EMAIL VERIFICATION</small></div></div></section>
+      <section className="auth-visual" aria-hidden="true"><div className="auth-brand"><BrandLockup tone="on-dark" /><small>EMAIL VERIFICATION</small></div></section>
       <section className="auth-panel"><div className="auth-form-wrap verify-result">
         <span className={`verify-symbol is-${state}`}>{state === "loading" ? "··" : state === "success" ? "✓" : state === "error" ? "!" : "@"}</span>
         <span className="eyebrow">EMAIL VERIFICATION / 邮箱验证</span>

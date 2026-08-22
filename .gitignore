@@ -45,6 +45,8 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/照片整理1/
+/照片整理2/
 /.agents/
 /.atomcode/
 /.claude/

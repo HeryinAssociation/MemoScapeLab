@@ -6,8 +6,8 @@ services:
     image: memoscape-self-hosted:latest
     container_name: memoscape
     restart: unless-stopped
-    ports:
-      - "18787:3000"
+    expose:
+      - "3000"
     command: ["corepack", "pnpm", "exec", "wrangler", "dev", "--config", "dist/server/wrangler.json", "--var", "TENCENT_SES_ENDPOINT:http://ses-proxy:8788/", "--var", "TENCENT_LIGHTCOS_PROXY_ENDPOINT:http://ses-proxy:8788/cos", "--ip", "0.0.0.0", "--port", "3000", "--persist-to", "/data", "--show-interactive-dev-session", "false"]
     depends_on:
       ses-proxy:

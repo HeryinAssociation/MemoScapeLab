@@ -43,7 +43,7 @@ TENCENT_LIGHTCOS_PUBLIC_DOMAIN=
 SETTINGS_ENCRYPTION_KEY=replace_with_base64_32_bytes
 
 # --- 对外只读 API（/api/v1，供展示项目调用）---
-# Bearer 密钥，数据接口校验 Authorization: Bearer <此值>。生成示例：openssl rand -base64 32
+# Bearer 密钥，仅项目列表校验 Authorization: Bearer <此值>；已发布单项目详情免密。生成示例：openssl rand -base64 32
 READ_API_KEY=replace_with_a_long_random_read_key
 # 允许的跨域来源（浏览器直调时必填），多个用英文逗号分隔；仅服务端调用可留空。
 PUBLIC_API_ALLOWED_ORIGIN=https://display.example.com

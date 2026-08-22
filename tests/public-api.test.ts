@@ -131,7 +131,14 @@ function mockDatabase() {
             const mode = typeof this.values[0] === "string" ? this.values[0] : undefined;
             const rows = [PUBLISHED_PROJECT]
               .filter((project) => project.publication_status === "published")
-              .filter((project) => !mode || project.mode === mode);
+              .filter((project) => !mode || project.mode === mode)
+              .map((project) => ({
+                ...project,
+                author_username: "记忆测绘员",
+                author_avatar_key: "lightcos:avatar-1",
+                author_created_at: "2025-06-01T00:00:00.000Z",
+                author_updated_at: "2025-06-02T00:00:00.000Z",
+              }));
             const limit = Number(this.values[mode ? 1 : 0]);
             const offset = Number(this.values[mode ? 2 : 1]);
             return { results: rows.slice(offset, offset + limit) };
@@ -220,6 +227,8 @@ test("项目列表：只返回已发布项目并按 updatedAt 倒序分页", asy
   assert.equal(payload.projects[0].id, "p1");
   assert.equal(payload.projects[0].title, "外滩 1991");
   assert.equal(payload.projects[0].coverUrl, "https://api.memoscapelab.example/api/assets/thumb-pan-1");
+  assert.equal(payload.projects[0].author.username, "记忆测绘员");
+  assert.equal(payload.projects[0].author.avatar.includes("/api/users/u1/avatar"), true);
   assert.deepEqual(payload.pagination, { page: 1, limit: 10, total: 1, totalPages: 1 });
   // 列表项不暴露 email/phone 等隐私字段
   assert.equal("email" in payload.projects[0], false);
@@ -232,7 +241,7 @@ test("项目列表：非法 mode 参数返回 400", async () => {
 });
 
 test("项目详情：返回完整聚合数据并绝对化 URL", async () => {
-  const response = await call("/api/v1/projects/p1", { key: READ_KEY });
+  const response = await call("/api/v1/projects/p1");
   assert.equal(response.status, 200);
   const payload = await response.json();
   const project = payload.project;
@@ -257,7 +266,7 @@ test("项目详情：返回完整聚合数据并绝对化 URL", async () => {
 });
 
 test("项目详情：assets 元数据包含 kind/宽高，0 尺寸转 null", async () => {
-  const response = await call("/api/v1/projects/p1", { key: READ_KEY });
+  const response = await call("/api/v1/projects/p1");
   const payload = await response.json();
   const original = payload.project.assets.find((asset: { kind: string }) => asset.kind === "original");
   const thumbnail = payload.project.assets.find((asset: { kind: string }) => asset.kind === "thumbnail");
@@ -268,12 +277,12 @@ test("项目详情：assets 元数据包含 kind/宽高，0 尺寸转 null", asy
 });
 
 test("项目详情：草稿项目返回 404", async () => {
-  const response = await call("/api/v1/projects/p2", { key: READ_KEY });
+  const response = await call("/api/v1/projects/p2");
   assert.equal(response.status, 404);
 });
 
 test("资产列表：只返回已发布项目的 ready 资产", async () => {
-  const response = await call("/api/v1/projects/p1/assets", { key: READ_KEY });
+  const response = await call("/api/v1/projects/p1/assets");
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.assets.length, 2);
@@ -281,8 +290,20 @@ test("资产列表：只返回已发布项目的 ready 资产", async () => {
 });
 
 test("资产列表：草稿项目返回 404", async () => {
-  const response = await call("/api/v1/projects/p2/assets", { key: READ_KEY });
+  const response = await call("/api/v1/projects/p2/assets");
   assert.equal(response.status, 404);
+});
+
+test("单个已发布项目 API 未配置 READ_API_KEY 仍可免密访问", async () => {
+  const request = new Request("https://api.memoscapelab.example/api/v1/projects/p1");
+  const response = await handlePublicApi(request, env({ READ_API_KEY: "" }), new URL(request.url));
+  assert.equal(response.status, 200);
+});
+
+test("单个已发布项目 API 对任意浏览器来源开放 CORS", async () => {
+  const response = await call("/api/v1/projects/p1", { origin: "https://viewer.example.com" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
 });
 
 test("OpenAPI 文档与 Swagger UI 免密钥可访问", async () => {
@@ -291,6 +312,7 @@ test("OpenAPI 文档与 Swagger UI 免密钥可访问", async () => {
   const payload = await spec.json();
   assert.equal(payload.openapi, "3.0.3");
   assert.ok(payload.paths["/api/v1/projects"]);
+  assert.deepEqual(payload.paths["/api/v1/projects/{id}"].get.security, []);
   const docs = await call("/api/v1/docs");
   assert.equal(docs.status, 200);
   assert.match(docs.headers.get("content-type") ?? "", /^text\/html\b/i);

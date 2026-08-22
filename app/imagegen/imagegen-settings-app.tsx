@@ -28,11 +28,42 @@ interface Draft {
   clearKey: boolean;
 }
 
-async function fetchSettingsView() {
-  const response = await authenticatedFetch("/api/settings/imagegen");
-  const payload = (await response.json()) as ImageGenSettingsView & { error?: string };
-  if (!response.ok) throw new Error(payload.error ?? "设置读取失败");
-  return payload;
+async function fetchSettingsView(signal?: AbortSignal) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await authenticatedFetch("/api/settings/imagegen", {
+        cache: "no-store",
+        signal,
+      });
+      const text = await response.text();
+      let payload: (ImageGenSettingsView & { error?: string }) | null = null;
+      try {
+        payload = JSON.parse(text) as ImageGenSettingsView & { error?: string };
+      } catch {
+        // A restarting local Worker can return a plain-text 5xx response.
+      }
+      if (response.ok && payload) return payload;
+
+      const error = new Error(payload?.error ?? "设置读取失败");
+      if (response.status < 500 && response.status !== 408 && response.status !== 429) {
+        Object.assign(error, { retryable: false });
+      }
+      throw error;
+    } catch (error) {
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+      if ((error as { retryable?: boolean }).retryable === false) throw error;
+      lastError = error;
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 250 : 700));
+      }
+    }
+  }
+  throw new Error(
+    lastError instanceof Error && !/Network connection lost/i.test(lastError.message)
+      ? lastError.message
+      : "连接暂时中断，请重试。",
+  );
 }
 
 export function ImageGenSettingsApp() {
@@ -68,10 +99,10 @@ export function ImageGenSettingsApp() {
   };
 
   useEffect(() => {
-    let active = true;
-    fetchSettingsView()
+    const controller = new AbortController();
+    fetchSettingsView(controller.signal)
       .then((payload) => {
-        if (!active) return;
+        if (controller.signal.aborted) return;
         setView(payload);
         setProvider(payload.provider);
         setDrafts({
@@ -83,13 +114,11 @@ export function ImageGenSettingsApp() {
         setMessage("已加载当前生成配置");
       })
       .catch((error: unknown) => {
-        if (!active) return;
+        if (controller.signal.aborted) return;
         setLoadState("error");
         setMessage(error instanceof Error ? error.message : "设置读取失败");
       });
-    return () => {
-      active = false;
-    };
+    return () => controller.abort();
   }, []);
 
   const updateDraft = (name: ImageGenProviderName, patch: Partial<Draft>) => {
@@ -136,6 +165,13 @@ export function ImageGenSettingsApp() {
           平台不提供或共用任何大模型 API。API Key 经 AES-GCM 加密后入库。
         </p>
       </div>
+
+      {loadState === "error" && (
+        <div className="settings-load-error" role="alert">
+          <span>{message}</span>
+          <button type="button" onClick={() => void refresh()}>重试</button>
+        </div>
+      )}
 
       <div className="source-layout">
         <div style={{ display: "grid", gap: 18 }}>

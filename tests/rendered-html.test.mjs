@@ -64,7 +64,7 @@ test("renders the project database as the primary admin application", async () =
   assert.match(html, /影像项目/);
   assert.match(html, /新建照片项目/);
   assert.match(html, /项目档案/);
-  assert.match(html, /生成设置/);
+  assert.match(html, /<small>生成<\/small>/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
@@ -83,15 +83,15 @@ test("renders the login and registration entry points", async () => {
   assert.match(await registration.text(), /建立账号|用户注册/);
 });
 
-test("renders the MemoscapeLab about page and team credits", async () => {
+test("renders the MemoscapeLab about page without team credits", async () => {
   const response = await render("/about");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /MemoscapeLab/);
   assert.match(html, /记忆空间实验室/);
   assert.match(html, /第十一届上海图书馆开放数据竞赛作品/);
-  assert.match(html, /付雅明、王凤羽/);
-  assert.match(html, /赵朔辰、曾泽川/);
+  assert.doesNotMatch(html, /指导教师|团队领队|技术研发|艺术设计|UI设计|测试调优/);
+  assert.doesNotMatch(html, /付雅明|王凤羽|郑晓优|赵朔辰|曾泽川|王宝笛|徐蒙|张妍|孟俊树/);
   assert.match(html, /2026年8月10日更新/);
 });
 
