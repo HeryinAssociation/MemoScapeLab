@@ -65,6 +65,8 @@ test("renders the project database as the primary admin application", async () =
   assert.match(html, /新建照片项目/);
   assert.match(html, /项目档案/);
   assert.match(html, /<small>生成<\/small>/);
+  assert.match(html, /href="\/"[^>]*><b[^>]*>⌂<\/b><small>主页<\/small><\/a>/);
+  assert.doesNotMatch(html, /localhost:3100/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 

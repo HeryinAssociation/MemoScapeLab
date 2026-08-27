@@ -39,6 +39,12 @@
             "in": "query",
             "description": "按渲染模式过滤：sphere360 / partialSphere / curvedPhoto / flatPhoto。",
             "schema": { "type": "string", "enum": ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"] }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "按展示分类过滤。现实全景约束优先；其余按全景显示或弧形球面归类。",
+            "schema": { "type": "string", "enum": ["presentPanorama", "panorama", "curvedSphere"] }
           }
         ],
         "responses": {
@@ -215,11 +221,12 @@
       },
       "ProjectSummary": {
         "type": "object",
-        "required": ["id", "title", "mode", "publicationStatus", "createdAt", "updatedAt", "author"],
+        "required": ["id", "title", "mode", "category", "publicationStatus", "createdAt", "updatedAt", "author"],
         "properties": {
           "id": { "type": "string" },
           "title": { "type": "string" },
           "mode": { "type": "string", "enum": ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"] },
+          "category": { "type": "string", "enum": ["presentPanorama", "panorama", "curvedSphere"] },
           "captureTime": { "type": "string", "description": "历史年代自由文本，非 ISO 时间戳", "example": "1991 年夏" },
           "location": { "type": "string" },
           "publicationStatus": { "type": "string", "enum": ["published"] },
@@ -241,11 +248,12 @@
       },
       "ProjectDetail": {
         "type": "object",
-        "required": ["id", "title", "mode", "workflowStep", "publicationStatus", "createdAt", "updatedAt", "history", "images", "render", "assets", "author", "scene"],
+        "required": ["id", "title", "mode", "category", "workflowStep", "publicationStatus", "createdAt", "updatedAt", "history", "images", "render", "assets", "author", "scene"],
         "properties": {
           "id": { "type": "string" },
           "title": { "type": "string" },
           "mode": { "type": "string", "enum": ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"] },
+          "category": { "type": "string", "enum": ["presentPanorama", "panorama", "curvedSphere"] },
           "workflowStep": { "type": "integer", "minimum": 1, "maximum": 4 },
           "publicationStatus": { "type": "string", "enum": ["published"] },
           "createdAt": { "type": "string", "format": "date-time" },
@@ -276,12 +284,14 @@
           },
           "images": {
             "type": "object",
-            "required": ["originalImageUrl", "originalThumbnailUrl", "panoramaImageUrl", "panoramaThumbnailUrl"],
+            "required": ["originalImageUrl", "originalThumbnailUrl", "panoramaImageUrl", "panoramaThumbnailUrl", "referencePanoramaImageUrl", "referencePanoramaThumbnailUrl"],
             "properties": {
               "originalImageUrl": { "type": "string", "format": "uri" },
               "originalThumbnailUrl": { "type": "string", "format": "uri", "description": "可能为空串，空时回退 originalImageUrl" },
               "panoramaImageUrl": { "type": "string", "format": "uri" },
-              "panoramaThumbnailUrl": { "type": "string", "format": "uri", "description": "AI 生成缩略图失败时为空串，空时回退 panoramaImageUrl" }
+              "panoramaThumbnailUrl": { "type": "string", "format": "uri", "description": "AI 生成缩略图失败时为空串，空时回退 panoramaImageUrl" },
+              "referencePanoramaImageUrl": { "type": "string", "format": "uri", "description": "现实参考全景；项目无现实全景约束时为空串" },
+              "referencePanoramaThumbnailUrl": { "type": "string", "format": "uri", "description": "现实参考全景缩略图；可能为空串" }
             }
           },
           "render": {
@@ -315,6 +325,7 @@
             "properties": {
               "provider": { "type": "string", "example": "seedream" },
               "model": { "type": "string" },
+              "generationMode": { "type": "string", "enum": ["historical_with_present_panorama", "historical_only"] },
               "status": { "type": "string", "enum": ["succeeded"] },
               "startedAt": { "type": ["string", "null"], "format": "date-time" },
               "finishedAt": { "type": ["string", "null"], "format": "date-time" }

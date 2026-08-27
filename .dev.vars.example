@@ -41,6 +41,8 @@ TENCENT_LIGHTCOS_PUBLIC_DOMAIN=
 # 生成示例：openssl rand -base64 32
 # 未配置时，平台会拒绝保存用户 API Key。
 SETTINGS_ENCRYPTION_KEY=replace_with_base64_32_bytes
+# 自托管 Worker 与固定目标代理之间的专用回调令牌（建议 32 字节随机 Base64）。
+IMAGEGEN_INTERNAL_TOKEN=replace_with_random_internal_token
 
 # --- 对外只读 API（/api/v1，供展示项目调用）---
 # Bearer 密钥，仅项目列表校验 Authorization: Bearer <此值>；已发布单项目详情免密。生成示例：openssl rand -base64 32

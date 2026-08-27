@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { R2Bucket, R2ObjectBody } from "../worker/auth";
-import { assetToDataUrl } from "../worker/image-gen/pipeline";
+import { assetToDataUrl, storeParsedImages } from "../worker/image-gen/pipeline";
 import { ImageGenError } from "../worker/image-gen/types";
 
 function streamOf(bytes: Uint8Array): ReadableStream {
@@ -88,4 +88,31 @@ test("assetToDataUrl：缺少 httpMetadata 时默认 image/png", async () => {
   const dataUrl = await assetToDataUrl(r2, "k.png");
   const { mime } = decodeDataUrl(dataUrl);
   assert.equal(mime, "image/png");
+});
+
+test("storeParsedImages：异步回调使用确定性 key，重试不会产生新对象", async () => {
+  const writes: Array<{ key: string; bytes: Uint8Array; contentType?: string }> = [];
+  const r2 = {
+    put: async (key: string, value: ArrayBuffer, options?: { httpMetadata?: { contentType?: string } }) => {
+      writes.push({
+        key,
+        bytes: new Uint8Array(value),
+        contentType: options?.httpMetadata?.contentType,
+      });
+    },
+  } as unknown as R2Bucket;
+  const parsed = { images: [{ b64: "aGVsbG8=", format: "png" }] };
+  const options = {
+    parsed,
+    r2,
+    r2KeyPrefix: "users/u/projects/p/generated",
+    keyForIndex: (index: number, extension: string) => `users/u/projects/p/generated/task-${index}.${extension}`,
+  };
+  const first = await storeParsedImages(options);
+  const second = await storeParsedImages(options);
+  assert.equal(first[0].key, "users/u/projects/p/generated/task-0.png");
+  assert.equal(second[0].key, first[0].key);
+  assert.deepEqual(writes.map((write) => write.key), [first[0].key, first[0].key]);
+  assert.equal(writes[0].contentType, "image/png");
+  assert.equal(new TextDecoder().decode(writes[0].bytes), "hello");
 });

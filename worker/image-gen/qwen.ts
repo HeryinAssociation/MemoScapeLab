@@ -42,6 +42,7 @@ export const qwenAdapter: ImageGenAdapter = {
       url: `${config.baseUrl}/api/v1/services/aigc/multimodal-generation/generation`,
       headers: { authorization: `Bearer ${config.apiKey}` },
       body: JSON.stringify(body),
+      contentType: "application/json",
     };
   },
   parseResponse(data: unknown): ImageGenParsed {

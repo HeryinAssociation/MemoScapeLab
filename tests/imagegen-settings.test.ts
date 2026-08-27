@@ -8,7 +8,12 @@ import {
   hasEncryptionKey,
   maskKey,
 } from "../worker/image-gen/crypto";
-import { resolveImageGenProvider, normalizeBaseUrl } from "../worker/image-gen";
+import {
+  normalizeBaseUrl,
+  resolvePanoramaSize,
+  resolveImageGenProvider,
+  resolveSeedreamBaseUrl,
+} from "../worker/image-gen";
 import {
   getImageGenSettingsView,
   saveImageGenSettings,
@@ -269,6 +274,31 @@ test("normalizeBaseUrl：Seedream 完整接口地址去重归一化", () => {
   );
 });
 
+test("resolveSeedreamBaseUrl：自托管环境仅透明代理官方 Ark 地址", () => {
+  assert.equal(
+    resolveSeedreamBaseUrl(
+      "https://ark.cn-beijing.volces.com/api/v3",
+      "http://ses-proxy:8788/ark/api/v3",
+    ),
+    "http://ses-proxy:8788/ark/api/v3",
+  );
+  assert.equal(
+    resolveSeedreamBaseUrl(
+      "https://images.example.com/api/v3",
+      "http://ses-proxy:8788/ark/api/v3",
+    ),
+    "https://images.example.com/api/v3",
+  );
+});
+
+test("resolvePanoramaSize：仅 Seedream 提升到合规的 2:1 像素尺寸", () => {
+  assert.equal(resolvePanoramaSize("seedream", "2048x1024"), "2880x1440");
+  assert.equal(2880 * 1440 >= 3_686_400, true);
+  assert.equal(2880 / 1440, 2);
+  assert.equal(resolvePanoramaSize("openai", "2048x1024"), "2048x1024");
+  assert.equal(resolvePanoramaSize("qwen", "2048x1024"), "2048x1024");
+});
+
 test("normalizeBaseUrl：OpenAI 完整接口地址去重归一化", () => {
   assert.equal(
     normalizeBaseUrl("https://api.openai.com/v1/images/edits", "openai"),
@@ -308,4 +338,21 @@ test("normalizeBaseUrl：resolveImageGenProvider 返回归一化后的 baseUrl",
   });
   const { config } = await resolveImageGenProvider({ DB: db, ...env() }, USER_A);
   assert.equal(config.baseUrl, "https://ark.cn-beijing.volces.com/api/v3");
+});
+
+test("resolveImageGenProvider：官方 Seedream 地址在自托管环境走固定代理", async () => {
+  const key = (await getEncryptionKey(env()))!;
+  const cipher = await encryptSecret(key, "ark-secret-3");
+  const db = settingsDb({
+    "imagegen.IMAGE_PROVIDER": "seedream",
+    "imagegen.SEEDREAM_MODEL": "model-x",
+    "imagegen.SEEDREAM_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
+    "imagegen.ARK_API_KEY": cipher,
+  });
+  const { config } = await resolveImageGenProvider({
+    DB: db,
+    ...env(),
+    SEEDREAM_PROXY_BASE_URL: "http://ses-proxy:8788/ark/api/v3",
+  }, USER_A);
+  assert.equal(config.baseUrl, "http://ses-proxy:8788/ark/api/v3");
 });

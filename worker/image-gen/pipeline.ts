@@ -23,6 +23,15 @@ export interface RunImageGenOptions {
   r2KeyPrefix: string;
 }
 
+export interface StoreParsedImagesOptions {
+  parsed: ImageGenParsed;
+  r2: R2Bucket;
+  r2KeyPrefix: string;
+  timeoutMs?: number;
+  /** 异步回调重试时使用确定性文件名，避免产生重复孤儿对象。 */
+  keyForIndex?: (index: number, extension: string) => string;
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -92,6 +101,47 @@ async function fetchImageBytes(
   return response.arrayBuffer();
 }
 
+/** 把厂商已解析的图片持久化到 R2；同步调用和异步代理回调共用。 */
+export async function storeParsedImages(
+  options: StoreParsedImagesOptions,
+): Promise<GeneratedImage[]> {
+  const {
+    parsed,
+    r2,
+    r2KeyPrefix,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    keyForIndex,
+  } = options;
+  const images: GeneratedImage[] = [];
+  for (let i = 0; i < parsed.images.length; i++) {
+    const item = parsed.images[i];
+    const format = (item.format ?? "png").toLowerCase().replace("jpg", "jpeg");
+    const extension = format === "jpeg" ? "jpg" : format;
+    const key = keyForIndex
+      ? keyForIndex(i, extension)
+      : `${r2KeyPrefix}/${crypto.randomUUID()}.${extension}`;
+    let bytes: ArrayBuffer;
+    if (item.b64) {
+      bytes = base64ToArrayBuffer(item.b64);
+    } else if (item.url) {
+      bytes = await fetchImageBytes(item.url, timeoutMs);
+    } else {
+      throw new ImageGenError("upstream_error", "厂商未返回图片数据。", false);
+    }
+    await r2.put(key, bytes, { httpMetadata: { contentType: contentTypeFor(format) } });
+    images.push({
+      key,
+      width: item.width ?? 0,
+      height: item.height ?? 0,
+      format,
+    });
+  }
+  if (images.length === 0) {
+    throw new ImageGenError("upstream_error", "生成结果为空。", false);
+  }
+  return images;
+}
+
 /**
  * 从 R2 读取资产并转成 data URL（MIME 小写），供厂商直接取图。
  * 注意：本地开发时 /api/assets 是 localhost 地址，厂商服务器无法访问，
@@ -127,7 +177,10 @@ export async function runImageGen(options: RunImageGenOptions): Promise<ImageGen
         built.url,
         {
           method: "POST",
-          headers: { "content-type": "application/json", ...built.headers },
+          headers: {
+            ...(built.contentType ? { "content-type": built.contentType } : {}),
+            ...built.headers,
+          },
           body: built.body,
         },
         timeoutMs,
@@ -143,31 +196,7 @@ export async function runImageGen(options: RunImageGenOptions): Promise<ImageGen
       }
 
       const parsed: ImageGenParsed = adapter.parseResponse(data);
-      const images: GeneratedImage[] = [];
-      for (let i = 0; i < parsed.images.length; i++) {
-        const item = parsed.images[i];
-        const format = (item.format ?? "png").toLowerCase().replace("jpg", "jpeg");
-        const extension = format === "jpeg" ? "jpg" : format;
-        const key = `${r2KeyPrefix}/${crypto.randomUUID()}.${extension}`;
-        let bytes: ArrayBuffer;
-        if (item.b64) {
-          bytes = base64ToArrayBuffer(item.b64);
-        } else if (item.url) {
-          bytes = await fetchImageBytes(item.url, timeoutMs);
-        } else {
-          throw new ImageGenError("upstream_error", "厂商未返回图片数据。", false);
-        }
-        await r2.put(key, bytes, { httpMetadata: { contentType: contentTypeFor(format) } });
-        images.push({
-          key,
-          width: item.width ?? 0,
-          height: item.height ?? 0,
-          format,
-        });
-      }
-      if (images.length === 0) {
-        throw new ImageGenError("upstream_error", "生成结果为空。", false);
-      }
+      const images = await storeParsedImages({ parsed, r2, r2KeyPrefix, timeoutMs });
       return { images, provider: adapter.name, model: config.model, usage: parsed.usage };
     } catch (error) {
       lastError = error;

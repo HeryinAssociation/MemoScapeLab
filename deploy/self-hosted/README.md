@@ -12,6 +12,18 @@ hard-coded SES hostname.
 The same unexposed proxy handles signed LightCOS requests, restricted to the two
 configured bucket hostnames in the configured region. It supports uploads,
 downloads, object checks, and deletes without weakening TLS verification.
+It also exposes a fixed `/ark/api/v3/images/generations` route for Seedream.
+The Worker reaches this route over the private Compose network, while the proxy
+validates Ark with Node's system CA store and forwards only to
+`ark.cn-beijing.volces.com`; it is not a general-purpose URL proxy.
+
+For long-running Seedream requests, the same proxy owns a persisted asynchronous
+job under `/ark/jobs/{taskId}` and calls the fixed internal Worker completion
+endpoint when Ark returns. Completed response bodies stay under
+`data/imagegen-proxy` only until the authenticated callback succeeds. Callback
+failures are retried, so a Worker restart or a transient local D1 lock does not
+leave the task permanently in `running`. OpenAI and Qwen keep their existing
+execution path.
 
 Create `deploy/self-hosted/secrets.dev.vars` from `.dev.vars.example`, then run:
 

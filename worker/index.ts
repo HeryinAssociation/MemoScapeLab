@@ -14,13 +14,30 @@ import {
 } from "../db/schema";
 import type { ImmersiveScene, SceneMode } from "../src/core/projection-types";
 import { BUNDLED_PROJECTS } from "../src/projects/bundled-projects";
-import { assetToDataUrl, resolveImageGenProvider, runImageGen } from "./image-gen";
+import {
+  assetToDataUrl,
+  resolvePanoramaSize,
+  resolveImageGenProvider,
+  runImageGen,
+  storeParsedImages,
+} from "./image-gen";
+import {
+  defaultPromptForMode,
+  normalizeImageGenerationMode,
+  referencePathsForMode,
+  type ImageGenerationMode,
+} from "./image-gen/modes";
 import {
   getImageGenSettingsView,
   saveImageGenSettings,
   type ImageGenSettingsInput,
 } from "./image-gen/settings";
 import { ImageGenError } from "./image-gen/types";
+import { seedreamAdapter } from "./image-gen/seedream";
+import {
+  hasSeedreamAsyncProxy,
+  submitSeedreamProxyJob,
+} from "./image-gen/seedream-proxy";
 import {
   ensureAuthDatabase,
   ensureSuperadmin,
@@ -80,6 +97,8 @@ interface ProjectRow {
   mode: SceneMode;
   original_image_url: string;
   original_thumbnail_url: string;
+  reference_panorama_image_url: string;
+  reference_panorama_thumbnail_url: string;
   panorama_image_url: string;
   panorama_thumbnail_url: string;
   scene_json: string;
@@ -129,6 +148,8 @@ function projectFromRow(row: ProjectRow) {
     mode: row.mode,
     originalImageUrl: row.original_image_url,
     originalThumbnailUrl: row.original_thumbnail_url,
+    referencePanoramaImageUrl: row.reference_panorama_image_url,
+    referencePanoramaThumbnailUrl: row.reference_panorama_thumbnail_url,
     panoramaImageUrl: row.panorama_image_url,
     panoramaThumbnailUrl: row.panorama_thumbnail_url,
     scene: JSON.parse(row.scene_json) as ImmersiveScene,
@@ -152,6 +173,8 @@ function projectListItemFromRow(row: ProjectListRow) {
     mode: row.mode,
     originalImageUrl: row.original_image_url,
     originalThumbnailUrl: row.original_thumbnail_url,
+    referencePanoramaImageUrl: row.reference_panorama_image_url,
+    referencePanoramaThumbnailUrl: row.reference_panorama_thumbnail_url,
     panoramaImageUrl: row.panorama_image_url,
     panoramaThumbnailUrl: row.panorama_thumbnail_url,
     workflowStep: row.workflow_step,
@@ -191,6 +214,12 @@ async function ensureDatabase(env: Env, url: URL) {
   if (!columns.results.some((column) => column.name === "panorama_thumbnail_url")) {
     await db.prepare("ALTER TABLE projects ADD COLUMN panorama_thumbnail_url TEXT NOT NULL DEFAULT ''").run();
   }
+  if (!columns.results.some((column) => column.name === "reference_panorama_image_url")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN reference_panorama_image_url TEXT NOT NULL DEFAULT ''").run();
+  }
+  if (!columns.results.some((column) => column.name === "reference_panorama_thumbnail_url")) {
+    await db.prepare("ALTER TABLE projects ADD COLUMN reference_panorama_thumbnail_url TEXT NOT NULL DEFAULT ''").run();
+  }
   if (!columns.results.some((column) => column.name === "moderation_status")) {
     await db.prepare("ALTER TABLE projects ADD COLUMN moderation_status TEXT NOT NULL DEFAULT 'clear'").run();
   }
@@ -212,6 +241,16 @@ async function ensureDatabase(env: Env, url: URL) {
   }
   if (!assetColumns.results.some((column) => column.name === "height")) {
     await db.prepare("ALTER TABLE assets ADD COLUMN height INTEGER NOT NULL DEFAULT 0").run();
+  }
+  const taskColumns = await db.prepare("PRAGMA table_info(image_gen_tasks)").all<{ name: string }>();
+  if (!taskColumns.results.some((column) => column.name === "generation_mode")) {
+    await db.prepare("ALTER TABLE image_gen_tasks ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'historical_only'").run();
+  }
+  if (!taskColumns.results.some((column) => column.name === "size")) {
+    await db.prepare("ALTER TABLE image_gen_tasks ADD COLUMN size TEXT NOT NULL DEFAULT ''").run();
+  }
+  if (!taskColumns.results.some((column) => column.name === "quality")) {
+    await db.prepare("ALTER TABLE image_gen_tasks ADD COLUMN quality TEXT NOT NULL DEFAULT ''").run();
   }
   await db.prepare(CREATE_ASSETS_PARENT_INDEX).run();
   await db.prepare(CREATE_PROJECTS_OWNER_INDEX).run();
@@ -307,6 +346,8 @@ function normalizedProjectInput(body: Record<string, unknown>, id?: string) {
     mode,
     originalImageUrl: String(body.originalImageUrl ?? ""),
     originalThumbnailUrl: String(body.originalThumbnailUrl ?? ""),
+    referencePanoramaImageUrl: String(body.referencePanoramaImageUrl ?? ""),
+    referencePanoramaThumbnailUrl: String(body.referencePanoramaThumbnailUrl ?? ""),
     panoramaImageUrl: String(body.panoramaImageUrl ?? ""),
     panoramaThumbnailUrl: String(body.panoramaThumbnailUrl ?? ""),
     workflowStep: Math.min(4, Math.max(1, Number(body.workflowStep ?? 1))),
@@ -419,6 +460,7 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
     const result = await env.DB.prepare(`
       SELECT p.id, p.title, p.capture_time, p.location, p.notes, p.mode,
              p.original_image_url, p.original_thumbnail_url,
+             p.reference_panorama_image_url, p.reference_panorama_thumbnail_url,
              p.panorama_image_url, p.panorama_thumbnail_url,
              p.workflow_step, p.publication_status, p.moderation_status,
              p.moderation_reason, p.moderated_at, p.moderated_by_user_id,
@@ -449,9 +491,10 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       INSERT INTO projects (
         id, title, capture_time, location, notes, mode,
         original_image_url, original_thumbnail_url,
+        reference_panorama_image_url, reference_panorama_thumbnail_url,
         panorama_image_url, panorama_thumbnail_url, scene_json,
         workflow_step, publication_status, owner_user_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
       .bind(
         project.id,
@@ -462,6 +505,8 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
         project.mode,
         project.originalImageUrl,
         project.originalThumbnailUrl,
+        project.referencePanoramaImageUrl,
+        project.referencePanoramaThumbnailUrl,
         project.panoramaImageUrl,
         project.panoramaThumbnailUrl,
         JSON.stringify(project.scene),
@@ -476,7 +521,14 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       env.DB,
       auth.user.id,
       project.id,
-      [project.originalImageUrl, project.originalThumbnailUrl, project.panoramaImageUrl, project.panoramaThumbnailUrl],
+      [
+        project.originalImageUrl,
+        project.originalThumbnailUrl,
+        project.referencePanoramaImageUrl,
+        project.referencePanoramaThumbnailUrl,
+        project.panoramaImageUrl,
+        project.panoramaThumbnailUrl,
+      ],
       project.publicationStatus,
     );
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id = ?")
@@ -509,6 +561,7 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       const row = await env.DB.prepare(`
         SELECT p.id, p.title, p.capture_time, p.location, p.notes, p.mode,
                p.original_image_url, p.original_thumbnail_url,
+               p.reference_panorama_image_url, p.reference_panorama_thumbnail_url,
                p.panorama_image_url, p.panorama_thumbnail_url,
                p.workflow_step, p.publication_status, p.moderation_status,
                p.moderation_reason, p.moderated_at, p.moderated_by_user_id,
@@ -579,6 +632,7 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       UPDATE projects SET
         title = ?, capture_time = ?, location = ?, notes = ?, mode = ?,
         original_image_url = ?, original_thumbnail_url = ?,
+        reference_panorama_image_url = ?, reference_panorama_thumbnail_url = ?,
         panorama_image_url = ?, panorama_thumbnail_url = ?, scene_json = ?,
         workflow_step = ?, publication_status = ?, updated_at = ?
       WHERE id = ?
@@ -591,6 +645,8 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
         project.mode,
         project.originalImageUrl,
         project.originalThumbnailUrl,
+        project.referencePanoramaImageUrl,
+        project.referencePanoramaThumbnailUrl,
         project.panoramaImageUrl,
         project.panoramaThumbnailUrl,
         JSON.stringify(project.scene),
@@ -604,7 +660,14 @@ async function handleProjectsApi(request: Request, env: Env, url: URL) {
       env.DB,
       existing.owner_user_id ?? auth.user.id,
       id,
-      [project.originalImageUrl, project.originalThumbnailUrl, project.panoramaImageUrl, project.panoramaThumbnailUrl],
+      [
+        project.originalImageUrl,
+        project.originalThumbnailUrl,
+        project.referencePanoramaImageUrl,
+        project.referencePanoramaThumbnailUrl,
+        project.panoramaImageUrl,
+        project.panoramaThumbnailUrl,
+      ],
       project.publicationStatus,
     );
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id = ?")
@@ -651,7 +714,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
 
     const body = await request.json().catch(() => null) as Record<string, unknown> | null;
     const kind = String(body?.kind ?? "") as LightCosAssetKind;
-    if (!(["original", "panorama", "thumbnail"] as string[]).includes(kind)) {
+    if (!(["original", "reference_panorama", "panorama", "thumbnail"] as string[]).includes(kind)) {
       return json({ error: "图片用途无效。" }, { status: 400 });
     }
     const contentType = String(body?.contentType ?? "").toLowerCase();
@@ -687,7 +750,7 @@ async function handleAssetsApi(request: Request, env: Env, url: URL) {
       if (!parentAssetId) return json({ error: "缩略图缺少原始资源关联。" }, { status: 400 });
       const parent = await env.DB.prepare(`
         SELECT id, project_id, owner_user_id FROM assets
-        WHERE id = ? AND status = 'ready' AND kind IN ('original', 'panorama')
+        WHERE id = ? AND status = 'ready' AND kind IN ('original', 'reference_panorama', 'panorama')
       `).bind(parentAssetId).first<{ id: string; project_id: string | null; owner_user_id: string }>();
       if (!parent || (parent.owner_user_id !== auth.user.id && auth.user.role !== "superadmin")) {
         return json({ error: "缩略图对应的原始资源不存在。" }, { status: 404 });
@@ -931,6 +994,9 @@ interface ImageGenTaskRow {
   model: string;
   prompt: string;
   reference_image_keys: string;
+  generation_mode: ImageGenerationMode;
+  size: string;
+  quality: string;
   status: "pending" | "running" | "succeeded" | "failed";
   result_keys: string;
   error: string | null;
@@ -939,11 +1005,158 @@ interface ImageGenTaskRow {
   finished_at: string | null;
 }
 
-const DEFAULT_GEN_PROMPT =
-  "把这张历史照片自然地扩展为可 360 度沉浸浏览的全景图，保持原有建筑、人物与光线风格一致，向四周平滑补全环境细节。";
-
 // 僵尸任务回收阈值：超过该时长仍未结束的 running/pending 任务视为中断
 const STALE_TASK_MS = 10 * 60 * 1000;
+const ASYNC_SEEDREAM_STALE_TASK_MS = 20 * 60 * 1000;
+
+async function markImageGenTaskFailed(env: Env, taskId: string, message: string) {
+  await env.DB
+    .prepare("UPDATE image_gen_tasks SET status = 'failed', error = ?, finished_at = ? WHERE id = ?")
+    .bind(message, new Date().toISOString(), taskId)
+    .run();
+}
+
+async function loadTaskReferenceImages(env: Env, task: ImageGenTaskRow): Promise<string[]> {
+  const referenceImages: string[] = [];
+  for (const source of JSON.parse(task.reference_image_keys) as string[]) {
+    referenceImages.push(await generationReferenceToDataUrl(env, source, task.project_id));
+  }
+  return referenceImages;
+}
+
+function taskImageGenRequest(task: ImageGenTaskRow, referenceImages: string[]) {
+  return {
+    prompt: task.prompt,
+    referenceImages,
+    size: task.size || undefined,
+    quality:
+      task.quality === "low" || task.quality === "medium" || task.quality === "high"
+        ? task.quality
+        : undefined,
+    watermark: false,
+  } as const;
+}
+
+async function finalizeImageGenTask(
+  env: Env,
+  task: ImageGenTaskRow,
+  resultKeys: string[],
+  deterministicThumbnail = false,
+) {
+  const now = () => new Date().toISOString();
+  const primaryUrl = `/api/assets/${encodeURIComponent(resultKeys[0])}`;
+  let thumbnailUrl = "";
+  try {
+    const primary = await env.MEDIA.get(resultKeys[0]);
+    if (primary?.body) {
+      const thumbKey = deterministicThumbnail
+        ? `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated/thumbnails/${task.id}.webp`
+        : `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated/thumbnails/${crypto.randomUUID()}.webp`;
+      const transformed = await env.IMAGES.input(primary.body)
+        .transform({ width: 1600, height: 900, fit: "scale-down" })
+        .output({ format: "webp", quality: 0.82 });
+      const thumbBytes = await transformed.response().arrayBuffer();
+      await env.MEDIA.put(thumbKey, thumbBytes, { httpMetadata: { contentType: "image/webp" } });
+      thumbnailUrl = `/api/assets/${encodeURIComponent(thumbKey)}`;
+    }
+  } catch {
+    // 缩略图失败不阻断全景图写入；前端会回退到原图。
+  }
+  await env.DB.batch([
+    env.DB
+      .prepare(
+        "UPDATE image_gen_tasks SET status = 'succeeded', result_keys = ?, error = NULL, finished_at = ? WHERE id = ?",
+      )
+      .bind(JSON.stringify(resultKeys), now(), task.id),
+    env.DB
+      .prepare(
+        "UPDATE projects SET panorama_image_url = ?, panorama_thumbnail_url = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(primaryUrl, thumbnailUrl, now(), task.project_id),
+  ]);
+}
+
+async function startSeedreamAsyncTask(env: Env, taskId: string) {
+  const task = await env.DB
+    .prepare("SELECT * FROM image_gen_tasks WHERE id = ?")
+    .bind(taskId)
+    .first<ImageGenTaskRow>();
+  if (!task) throw new ImageGenError("invalid_input", "生成任务不存在。");
+  if (!task.owner_user_id) {
+    throw new ImageGenError("unconfigured", "生成任务缺少用户归属，无法读取个人 API 设置。");
+  }
+  await env.DB
+    .prepare("UPDATE image_gen_tasks SET status = 'running', started_at = ? WHERE id = ?")
+    .bind(new Date().toISOString(), taskId)
+    .run();
+  const provider = await resolveImageGenProvider(env, task.owner_user_id, "seedream");
+  const referenceImages = await loadTaskReferenceImages(env, task);
+  await submitSeedreamProxyJob({
+    env,
+    taskId,
+    adapter: provider.adapter,
+    config: provider.config,
+    request: taskImageGenRequest(task, referenceImages),
+  });
+}
+
+async function handleSeedreamProxyCallback(
+  request: Request,
+  env: Env,
+  taskId: string,
+): Promise<Response> {
+  const expectedToken = String(env.IMAGEGEN_INTERNAL_TOKEN ?? "");
+  const suppliedToken = request.headers.get("x-memoscape-internal-token") ?? "";
+  if (!expectedToken || suppliedToken !== expectedToken) {
+    return json({ error: "Forbidden" }, { status: 403 });
+  }
+  const task = await env.DB
+    .prepare("SELECT * FROM image_gen_tasks WHERE id = ?")
+    .bind(taskId)
+    .first<ImageGenTaskRow>();
+  if (!task) return json({ error: "任务不存在。" }, { status: 404 });
+  if (task.provider !== "seedream") {
+    return json({ error: "任务厂商不匹配。" }, { status: 409 });
+  }
+  if (task.status === "succeeded") return new Response(null, { status: 204 });
+
+  const upstreamStatus = Number(request.headers.get("x-memoscape-upstream-status") || "502");
+  const responseText = await request.text();
+  if (!Number.isInteger(upstreamStatus) || upstreamStatus < 200 || upstreamStatus >= 300) {
+    await markImageGenTaskFailed(
+      env,
+      task.id,
+      `Seedream 请求失败（${Number.isInteger(upstreamStatus) ? upstreamStatus : 502}）：${responseText.slice(0, 500)}`,
+    );
+    return new Response(null, { status: 204 });
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseText);
+  } catch {
+    await markImageGenTaskFailed(env, task.id, "Seedream 返回了无法解析的响应。");
+    return new Response(null, { status: 204 });
+  }
+  try {
+    const parsed = seedreamAdapter.parseResponse(payload);
+    const prefix = `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated`;
+    const images = await storeParsedImages({
+      parsed,
+      r2: env.MEDIA,
+      r2KeyPrefix: prefix,
+      keyForIndex: (index, extension) => `${prefix}/${task.id}-${index}.${extension}`,
+    });
+    await finalizeImageGenTask(env, task, images.map((image) => image.key), true);
+    return new Response(null, { status: 204 });
+  } catch (error) {
+    if (error instanceof ImageGenError && !error.retryable) {
+      await markImageGenTaskFailed(env, task.id, error.message);
+      return new Response(null, { status: 204 });
+    }
+    throw error;
+  }
+}
 
 async function handleGenerateApi(
   request: Request,
@@ -951,6 +1164,11 @@ async function handleGenerateApi(
   url: URL,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  const callbackMatch = url.pathname.match(/^\/api\/internal\/imagegen\/complete\/([^/]+)$/);
+  if (callbackMatch && request.method === "POST") {
+    return handleSeedreamProxyCallback(request, env, callbackMatch[1]);
+  }
+
   // 提交生成任务：登录 + CSRF + 项目所有权，后台 waitUntil 执行
   if (url.pathname === "/api/generate" && request.method === "POST") {
     const auth = await getAuth(request, env.DB);
@@ -965,6 +1183,7 @@ async function handleGenerateApi(
       size?: unknown;
       quality?: unknown;
       provider?: unknown;
+      mode?: unknown;
     } | null;
     const projectId = typeof body?.projectId === "string" ? body.projectId : "";
     if (!projectId) return json({ error: "缺少项目 ID。" }, { status: 400 });
@@ -981,13 +1200,30 @@ async function handleGenerateApi(
       return json({ error: "请先上传原图。" }, { status: 400 });
     }
 
+    const generationMode = normalizeImageGenerationMode(body?.mode);
+    if (
+      generationMode === "historical_with_present_panorama" &&
+      !project.reference_panorama_image_url
+    ) {
+      return json({ error: "推荐模式需要先上传现实参考全景。" }, { status: 400 });
+    }
+
     const prompt =
-      typeof body?.prompt === "string" && body.prompt.trim() ? body.prompt.trim() : DEFAULT_GEN_PROMPT;
-    const size = typeof body?.size === "string" && body.size ? body.size : undefined;
+      typeof body?.prompt === "string" && body.prompt.trim()
+        ? body.prompt.trim()
+        : defaultPromptForMode(generationMode, project.capture_time);
+    const requestedSize = typeof body?.size === "string" ? body.size : undefined;
     const quality =
       body?.quality === "low" || body?.quality === "medium" || body?.quality === "high"
         ? body.quality
-        : undefined;
+        : "medium";
+    const referencePaths = referencePathsForMode(
+      {
+        originalImageUrl: project.original_image_url,
+        referencePanoramaImageUrl: project.reference_panorama_image_url,
+      },
+      generationMode,
+    );
 
     // 提前解析厂商，未配置时立即报错而不是后台失败
     const provider = await resolveImageGenProvider(
@@ -995,14 +1231,15 @@ async function handleGenerateApi(
       auth.user.id,
       body?.provider as string | undefined,
     );
+    const size = resolvePanoramaSize(provider.adapter.name, requestedSize);
     const taskId = crypto.randomUUID();
     const now = new Date().toISOString();
     await env.DB
       .prepare(
         `INSERT INTO image_gen_tasks (
           id, project_id, owner_user_id, provider, model, prompt,
-          reference_image_keys, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          reference_image_keys, generation_mode, size, quality, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .bind(
         taskId,
@@ -1011,10 +1248,25 @@ async function handleGenerateApi(
         provider.adapter.name,
         provider.config.model,
         prompt,
-        JSON.stringify([project.original_image_url]),
+        JSON.stringify(referencePaths),
+        generationMode,
+        size,
+        quality,
         now,
       )
       .run();
+
+    if (provider.adapter.name === "seedream" && hasSeedreamAsyncProxy(env)) {
+      try {
+        // 只等待参考图交给内网代理；Ark 长连接由代理持有，结果通过内部回调落库。
+        await startSeedreamAsyncTask(env, taskId);
+        return json({ taskId, status: "running" }, { status: 202 });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await markImageGenTaskFailed(env, taskId, message);
+        return json({ taskId, status: "failed", error: message }, { status: 502 });
+      }
+    }
 
     ctx.waitUntil(runImageGenTask(env, taskId));
     return json({ taskId, status: "pending" }, { status: 202 });
@@ -1036,7 +1288,10 @@ async function handleGenerateApi(
     // 僵尸任务回收：后台执行中断（如 dev server 重启）会导致任务永远卡在 running/pending
     if (task.status === "running" || task.status === "pending") {
       const anchor = task.status === "running" ? task.started_at : task.created_at;
-      if (anchor && Date.now() - new Date(anchor).getTime() > STALE_TASK_MS) {
+      const staleAfter = task.provider === "seedream" && hasSeedreamAsyncProxy(env)
+        ? ASYNC_SEEDREAM_STALE_TASK_MS
+        : STALE_TASK_MS;
+      if (anchor && Date.now() - new Date(anchor).getTime() > staleAfter) {
         const staleError = "生成超时，任务已中断。";
         await env.DB
           .prepare(
@@ -1059,6 +1314,9 @@ async function handleGenerateApi(
       error: task.error,
       provider: task.provider,
       model: task.model,
+      mode: task.generation_mode,
+      size: task.size,
+      quality: task.quality,
       images: resultKeys.map((key) => ({ key, url: `/api/assets/${encodeURIComponent(key)}` })),
       thumbnailUrl: project?.panorama_thumbnail_url ?? "",
     });
@@ -1086,56 +1344,19 @@ async function runImageGenTask(env: Env, taskId: string) {
     }
     const provider = await resolveImageGenProvider(env, task.owner_user_id, task.provider);
     // 私有参考图转 Base64，仅发送给该用户自己配置并选择的生成厂商。
-    const referenceImages: string[] = [];
-    for (const path of JSON.parse(task.reference_image_keys) as string[]) {
-      referenceImages.push(await generationReferenceToDataUrl(env, path, task.project_id));
-    }
+    const referenceImages = await loadTaskReferenceImages(env, task);
     const result = await runImageGen({
       adapter: provider.adapter,
       config: provider.config,
-      request: {
-        prompt: task.prompt,
-        referenceImages,
-        watermark: false,
-      },
+      request: taskImageGenRequest(task, referenceImages),
       r2: env.MEDIA,
       r2KeyPrefix: `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated`,
     });
     const resultKeys = result.images.map((image) => image.key);
-    const primaryUrl = `/api/assets/${encodeURIComponent(resultKeys[0])}`;
-    // 用 Cloudflare Images 为生成图产 WebP 缩略图落 R2；失败不阻断任务，全景图仍可用
-    let thumbnailUrl = "";
-    try {
-      const primary = await env.MEDIA.get(resultKeys[0]);
-      if (primary?.body) {
-        const thumbKey = `users/${task.owner_user_id ?? "unknown"}/projects/${task.project_id}/generated/thumbnails/${crypto.randomUUID()}.webp`;
-        const transformed = await env.IMAGES.input(primary.body)
-          .transform({ width: 1600, height: 900, fit: "scale-down" })
-          .output({ format: "webp", quality: 0.82 });
-        const thumbBytes = await transformed.response().arrayBuffer();
-        await env.MEDIA.put(thumbKey, thumbBytes, { httpMetadata: { contentType: "image/webp" } });
-        thumbnailUrl = `/api/assets/${encodeURIComponent(thumbKey)}`;
-      }
-    } catch {
-      // 缩略图生成失败时保持空值，前端封面回退到全景原图
-    }
-    await env.DB.batch([
-      env.DB
-        .prepare(
-          "UPDATE image_gen_tasks SET status = 'succeeded', result_keys = ?, finished_at = ? WHERE id = ?",
-        )
-        .bind(JSON.stringify(resultKeys), now(), taskId),
-      env.DB
-        .prepare(
-          "UPDATE projects SET panorama_image_url = ?, panorama_thumbnail_url = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(primaryUrl, thumbnailUrl, now(), task.project_id),
-    ]);
+    await finalizeImageGenTask(env, task, resultKeys);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await env.DB
-      .prepare("UPDATE image_gen_tasks SET status = 'failed', error = ?, finished_at = ? WHERE id = ?")
-      .bind(message, now(), taskId);
+    await markImageGenTaskFailed(env, taskId, message);
   }
 }
 
@@ -1221,7 +1442,11 @@ if (["/proj", "/work", "/about", "/usr", "/usradmin", "/imagegen"].some(
       if (url.pathname === "/api/assets" || url.pathname.startsWith("/api/assets/")) {
         return await handleAssetsApi(request, env, url);
       }
-      if (url.pathname === "/api/generate" || url.pathname.startsWith("/api/generate/")) {
+      if (
+        url.pathname === "/api/generate" ||
+        url.pathname.startsWith("/api/generate/") ||
+        url.pathname.startsWith("/api/internal/imagegen/complete/")
+      ) {
         return await handleGenerateApi(request, env, url, ctx);
       }
       if (url.pathname === "/api/settings/imagegen") {

@@ -18,8 +18,8 @@ export const seedreamAdapter: ImageGenAdapter = {
     const body: Record<string, unknown> = {
       model: config.model,
       prompt: request.prompt,
-      // 统一请求 url，由管道立即下载落 R2（避免临时 URL 过期）
-      response_format: "url",
+      // 直接返回 Base64，避免自托管 Workerd 再次下载临时 HTTPS 结果时触发证书链问题。
+      response_format: "b64_json",
       // 显式 png：Seedream 5.0 lite 支持且无压缩伪影，适配全景输出
       output_format: "png",
       watermark: request.watermark ?? false,
@@ -36,6 +36,7 @@ export const seedreamAdapter: ImageGenAdapter = {
       url: `${config.baseUrl}/images/generations`,
       headers: { authorization: `Bearer ${config.apiKey}` },
       body: JSON.stringify(body),
+      contentType: "application/json",
     };
   },
   parseResponse(data: unknown): ImageGenParsed {

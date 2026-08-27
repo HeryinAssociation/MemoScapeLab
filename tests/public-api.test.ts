@@ -15,8 +15,11 @@ const PUBLISHED_PROJECT = {
   mode: "curvedPhoto",
   original_image_url: "/api/assets/orig-1",
   original_thumbnail_url: "/api/assets/thumb-orig-1",
+  reference_panorama_image_url: "/api/assets/present-panorama-1",
+  reference_panorama_thumbnail_url: "/api/assets/thumb-present-panorama-1",
   panorama_image_url: "/api/assets/pan-1",
   panorama_thumbnail_url: "/api/assets/thumb-pan-1",
+  generation_mode: "historical_with_present_panorama",
   scene_json: JSON.stringify({
     id: "p1",
     title: "外滩 1991",
@@ -82,6 +85,20 @@ const ASSET_ROWS = [
 
 /** 按 SQL 形状匹配的内存版 D1 mock。 */
 function mockDatabase() {
+  const matchesCategory = (project: typeof PUBLISHED_PROJECT, query: string) => {
+    if (/reference_panorama_image_url <> ''/i.test(query)) {
+      return Boolean(project.reference_panorama_image_url);
+    }
+    if (/projects\.mode IN \('sphere360', 'partialSphere'\)/i.test(query)) {
+      return !project.reference_panorama_image_url
+        && ["sphere360", "partialSphere"].includes(project.mode);
+    }
+    if (/projects\.mode IN \('curvedPhoto', 'flatPhoto'\)/i.test(query)) {
+      return !project.reference_panorama_image_url
+        && ["curvedPhoto", "flatPhoto"].includes(project.mode);
+    }
+    return true;
+  };
   const findProject = (id: string) => {
     const row = [PUBLISHED_PROJECT, DRAFT_PROJECT].find((project) => project.id === id);
     return row ? { ...row } : null;
@@ -94,7 +111,9 @@ function mockDatabase() {
         async first() {
           if (/COUNT\(\*\) AS total/i.test(query)) {
             const mode = this.values[0];
-            const rows = [PUBLISHED_PROJECT].filter((project) => !mode || project.mode === mode);
+            const rows = [PUBLISHED_PROJECT]
+              .filter((project) => !mode || project.mode === mode)
+              .filter((project) => matchesCategory(project, query));
             return { total: rows.length };
           }
           if (/FROM projects WHERE id = \? AND publication_status = 'published'/i.test(query)) {
@@ -118,6 +137,7 @@ function mockDatabase() {
             return {
               provider: "seedream",
               model: "doubao-seedream-4-0-250828",
+              generation_mode: "historical_with_present_panorama",
               status: "succeeded",
               started_at: "2026-02-01T00:00:00.000Z",
               finished_at: "2026-02-01T00:05:00.000Z",
@@ -132,6 +152,7 @@ function mockDatabase() {
             const rows = [PUBLISHED_PROJECT]
               .filter((project) => project.publication_status === "published")
               .filter((project) => !mode || project.mode === mode)
+              .filter((project) => matchesCategory(project, query))
               .map((project) => ({
                 ...project,
                 author_username: "记忆测绘员",
@@ -226,6 +247,7 @@ test("项目列表：只返回已发布项目并按 updatedAt 倒序分页", asy
   assert.equal(payload.projects.length, 1);
   assert.equal(payload.projects[0].id, "p1");
   assert.equal(payload.projects[0].title, "外滩 1991");
+  assert.equal(payload.projects[0].category, "presentPanorama");
   assert.equal(payload.projects[0].coverUrl, "https://api.memoscapelab.example/api/assets/thumb-pan-1");
   assert.equal(payload.projects[0].author.username, "记忆测绘员");
   assert.equal(payload.projects[0].author.avatar.includes("/api/users/u1/avatar"), true);
@@ -240,12 +262,31 @@ test("项目列表：非法 mode 参数返回 400", async () => {
   assert.equal(response.status, 400);
 });
 
+test("项目列表：现实参考全景分类优先于场景渲染模式", async () => {
+  const constrained = await call("/api/v1/projects?category=presentPanorama", { key: READ_KEY });
+  const constrainedPayload = await constrained.json();
+  assert.equal(constrained.status, 200);
+  assert.equal(constrainedPayload.projects.length, 1);
+  assert.equal(constrainedPayload.projects[0].category, "presentPanorama");
+
+  const curved = await call("/api/v1/projects?category=curvedSphere", { key: READ_KEY });
+  const curvedPayload = await curved.json();
+  assert.equal(curved.status, 200);
+  assert.equal(curvedPayload.projects.length, 0);
+});
+
+test("项目列表：非法 category 参数返回 400", async () => {
+  const response = await call("/api/v1/projects?category=no-such-category", { key: READ_KEY });
+  assert.equal(response.status, 400);
+});
+
 test("项目详情：返回完整聚合数据并绝对化 URL", async () => {
   const response = await call("/api/v1/projects/p1");
   assert.equal(response.status, 200);
   const payload = await response.json();
   const project = payload.project;
   assert.equal(project.id, "p1");
+  assert.equal(project.category, "presentPanorama");
   assert.equal(project.publicationStatus, "published");
   assert.equal(project.history.captureTime, "1991 年夏");
   assert.equal(project.history.metadata.aiColorized, true);
@@ -257,11 +298,20 @@ test("项目详情：返回完整聚合数据并绝对化 URL", async () => {
     project.images.panoramaThumbnailUrl,
     "https://api.memoscapelab.example/api/assets/thumb-pan-1",
   );
+  assert.equal(
+    project.images.referencePanoramaImageUrl,
+    "https://api.memoscapelab.example/api/assets/present-panorama-1",
+  );
+  assert.equal(
+    project.images.referencePanoramaThumbnailUrl,
+    "https://api.memoscapelab.example/api/assets/thumb-present-panorama-1",
+  );
   assert.equal(project.render.view.hfov, 90);
   assert.equal(project.author.username, "记忆测绘员");
   assert.equal(project.author.avatar.includes("/api/users/u1/avatar"), true);
   assert.equal("email" in project.author, false);
   assert.equal(project.aiProvenance.provider, "seedream");
+  assert.equal(project.aiProvenance.generationMode, "historical_with_present_panorama");
   assert.equal(project.scene.source, "https://api.memoscapelab.example/api/assets/pan-1");
 });
 

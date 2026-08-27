@@ -12,6 +12,8 @@ export interface PanoramaProject {
   mode: SceneMode;
   originalImageUrl: string;
   originalThumbnailUrl: string;
+  referencePanoramaImageUrl: string;
+  referencePanoramaThumbnailUrl: string;
   panoramaImageUrl: string;
   panoramaThumbnailUrl: string;
   scene: ImmersiveScene;

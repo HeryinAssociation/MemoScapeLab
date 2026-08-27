@@ -6,7 +6,7 @@ import { qwenAdapter } from "./qwen";
 import { seedreamAdapter } from "./seedream";
 import { KEY_PREFIX, loadSettingsMap, resolveSecretKey } from "./settings";
 
-export { runImageGen, assetToDataUrl } from "./pipeline";
+export { runImageGen, assetToDataUrl, storeParsedImages } from "./pipeline";
 
 export const ADAPTERS: Record<ImageGenProviderName, ImageGenAdapter> = {
   seedream: seedreamAdapter,
@@ -14,9 +14,29 @@ export const ADAPTERS: Record<ImageGenProviderName, ImageGenAdapter> = {
   qwen: qwenAdapter,
 };
 
+export const DEFAULT_PANORAMA_SIZE = "2048x1024";
+export const SEEDREAM_PANORAMA_SIZE = "2880x1440";
+
+/** Seedream 5.0 要求输出不少于 3,686,400 像素；其他厂商保持现有尺寸契约。 */
+export function resolvePanoramaSize(
+  provider: ImageGenProviderName,
+  requestedSize?: string,
+): string {
+  if (provider === "seedream") return SEEDREAM_PANORAMA_SIZE;
+  return requestedSize === DEFAULT_PANORAMA_SIZE
+    ? requestedSize
+    : DEFAULT_PANORAMA_SIZE;
+}
+
 /** 平台只提供用户 API Key 的数据库加密主密钥，不提供图片生成 API。 */
 export interface ImageGenEnv {
   SETTINGS_ENCRYPTION_KEY?: string;
+  /** 自托管环境的固定目标内网代理；用户界面仍保存并显示官方 Ark 地址。 */
+  SEEDREAM_PROXY_BASE_URL?: string;
+  /** 自托管环境由现有固定目标代理持有 Seedream 长连接。 */
+  SEEDREAM_ASYNC_PROXY_URL?: string;
+  /** Worker 与内网代理回调之间的专用共享令牌。 */
+  IMAGEGEN_INTERNAL_TOKEN?: string;
 }
 
 const ENDPOINT_SUFFIXES: Record<ImageGenProviderName, string[]> = {
@@ -35,6 +55,18 @@ export function normalizeBaseUrl(baseUrl: string, provider: ImageGenProviderName
     }
   }
   return url;
+}
+
+export function resolveSeedreamBaseUrl(configuredBaseUrl: string, proxyBaseUrl?: string) {
+  const configured = normalizeBaseUrl(configuredBaseUrl, "seedream");
+  const proxy = String(proxyBaseUrl ?? "").trim();
+  if (!proxy) return configured;
+  try {
+    if (new URL(configured).hostname !== "ark.cn-beijing.volces.com") return configured;
+  } catch {
+    return configured;
+  }
+  return normalizeBaseUrl(proxy, "seedream");
 }
 
 export async function resolveImageGenProvider(
@@ -64,9 +96,9 @@ export async function resolveImageGenProvider(
         adapter: seedreamAdapter,
         config: {
           apiKey,
-          baseUrl: normalizeBaseUrl(
+          baseUrl: resolveSeedreamBaseUrl(
             get("SEEDREAM_BASE_URL") || "https://ark.cn-beijing.volces.com/api/v3",
-            "seedream",
+            env.SEEDREAM_PROXY_BASE_URL,
           ),
           model,
         },
@@ -83,7 +115,7 @@ export async function resolveImageGenProvider(
             get("OPENAI_BASE_URL") || "https://api.openai.com/v1",
             "openai",
           ),
-          model: get("OPENAI_IMAGE_MODEL") || "gpt-image-1",
+          model: get("OPENAI_IMAGE_MODEL") || "gpt-image-2",
         },
       };
     }

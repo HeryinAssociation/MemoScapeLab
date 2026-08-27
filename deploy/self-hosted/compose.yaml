@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     expose:
       - "3000"
-    command: ["corepack", "pnpm", "exec", "wrangler", "dev", "--config", "dist/server/wrangler.json", "--var", "TENCENT_SES_ENDPOINT:http://ses-proxy:8788/", "--var", "TENCENT_LIGHTCOS_PROXY_ENDPOINT:http://ses-proxy:8788/cos", "--ip", "0.0.0.0", "--port", "3000", "--persist-to", "/data", "--show-interactive-dev-session", "false"]
+    command: ["corepack", "pnpm", "exec", "wrangler", "dev", "--config", "dist/server/wrangler.json", "--var", "TENCENT_SES_ENDPOINT:http://ses-proxy:8788/", "--var", "TENCENT_LIGHTCOS_PROXY_ENDPOINT:http://ses-proxy:8788/cos", "--var", "SEEDREAM_PROXY_BASE_URL:http://ses-proxy:8788/ark/api/v3", "--var", "SEEDREAM_ASYNC_PROXY_URL:http://ses-proxy:8788/ark/jobs", "--ip", "0.0.0.0", "--port", "3000", "--persist-to", "/data", "--show-interactive-dev-session", "false"]
     depends_on:
       ses-proxy:
         condition: service_healthy
@@ -33,6 +33,9 @@ services:
     container_name: memoscape-ses-proxy
     restart: unless-stopped
     command: ["node", "/app/deploy/self-hosted/ses-proxy.mjs"]
+    environment:
+      NODE_USE_SYSTEM_CA: "1"
+      IMAGEGEN_CALLBACK_URL: "http://memoscape:3000/api/internal/imagegen/complete"
     env_file:
       - ./secrets.dev.vars
     expose:
@@ -42,6 +45,7 @@ services:
       - /tmp
     volumes:
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+      - ./data/imagegen-proxy:/proxy-data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s

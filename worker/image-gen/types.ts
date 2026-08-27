@@ -2,10 +2,10 @@
 
 export type ImageGenProviderName = "seedream" | "openai" | "qwen";
 
-/** 统一请求：图生图（I2I）场景，referenceImages 为本项目已上传原图的公开 URL。 */
+/** 统一请求：图生图（I2I）场景，referenceImages 按角色顺序传入参考图。 */
 export interface ImageGenRequest {
   prompt: string;
-  /** 参考图 URL（如 /api/assets/...），适配器各自转成厂商接受的形式。 */
+  /** 参考图 URL 或 data URL；适配器各自转成厂商接受的形式。 */
   referenceImages: string[];
   /** 统一尺寸写法 "1024x1024"；适配器负责转厂商格式（qwen 用 * 分隔）。 */
   size?: string;
@@ -74,7 +74,9 @@ export interface ImageGenAdapter {
   buildRequest(config: ProviderConfig, request: ImageGenRequest): {
     url: string;
     headers: Record<string, string>;
-    body: string; // JSON 序列化后的请求体
+    body: BodyInit;
+    /** multipart/form-data 必须留空，让运行时自动补 boundary。 */
+    contentType?: string;
   };
   parseResponse(data: unknown): ImageGenParsed;
 }

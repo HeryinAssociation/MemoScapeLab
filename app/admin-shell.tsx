@@ -9,7 +9,9 @@ import { OnboardingGuide } from "./onboarding-guide";
 type AdminSection = "projects" | "work" | "about" | "user" | "users" | "imagegen";
 
 const NAV_ITEMS = [
-  { key: "home", label: "主页", symbol: "⌂", href: "http://localhost:3100/", external: true },
+  // Use the shared public origin so the deployment gateway can route `/` to
+  // the front page without leaking a development-only localhost address.
+  { key: "home", label: "主页", symbol: "⌂", href: "/", external: true },
   { key: "projects", label: "项目", symbol: "▦", href: "/proj", external: false },
   { key: "work", label: "工作台", symbol: "◎", href: "/work", external: false },
   { key: "imagegen", label: "生成", symbol: "✧", href: "/imagegen", external: false },

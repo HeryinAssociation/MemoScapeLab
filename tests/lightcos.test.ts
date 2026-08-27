@@ -22,6 +22,7 @@ const config = {
 
 test("maps originals and derived media to separate LightCOS buckets", () => {
   assert.equal(lightCosBucketForKind(config, "original"), config.archiveBucket);
+  assert.equal(lightCosBucketForKind(config, "reference_panorama"), config.mediaBucket);
   assert.equal(lightCosBucketForKind(config, "panorama"), config.mediaBucket);
   assert.equal(lightCosBucketForKind(config, "thumbnail"), config.mediaBucket);
   assert.equal(lightCosBucketForKind(config, "avatar"), config.mediaBucket);
@@ -29,6 +30,7 @@ test("maps originals and derived media to separate LightCOS buckets", () => {
 
 test("enforces image types and per-kind upload limits", () => {
   assert.equal(validateLightCosUpload("original", "image/jpeg", 10 * 1024 * 1024).extension, ".jpg");
+  assert.equal(validateLightCosUpload("reference_panorama", "image/webp", 50 * 1024 * 1024).extension, ".webp");
   assert.equal(validateLightCosUpload("panorama", "image/webp", 50 * 1024 * 1024).extension, ".webp");
   assert.equal(validateLightCosUpload("avatar", "image/png", 5 * 1024 * 1024).extension, ".png");
   assert.throws(() => validateLightCosUpload("original", "image/jpeg", 10 * 1024 * 1024 + 1), /10 MB/);

@@ -20,6 +20,8 @@ interface ProjectRow {
   mode: SceneMode;
   original_image_url: string;
   original_thumbnail_url: string;
+  reference_panorama_image_url: string;
+  reference_panorama_thumbnail_url: string;
   panorama_image_url: string;
   panorama_thumbnail_url: string;
   scene_json: string;
@@ -60,8 +62,15 @@ interface AssetRow {
 }
 
 const SCENE_MODES: SceneMode[] = ["sphere360", "partialSphere", "curvedPhoto", "flatPhoto"];
+const PROJECT_CATEGORIES = ["presentPanorama", "panorama", "curvedSphere"] as const;
+type ProjectCategory = (typeof PROJECT_CATEGORIES)[number];
 const LIST_DEFAULT_LIMIT = 20;
 const LIST_MAX_LIMIT = 100;
+
+function projectCategory(mode: SceneMode, referencePanoramaImageUrl: string): ProjectCategory {
+  if (referencePanoramaImageUrl) return "presentPanorama";
+  return mode === "sphere360" || mode === "partialSphere" ? "panorama" : "curvedSphere";
+}
 
 /** 常数时间比较，避免 API Key 被时序侧信道探测。 */
 function timingSafeEqual(a: string, b: string): boolean {
@@ -135,6 +144,7 @@ function projectSummary(row: ProjectSummaryRow, origin: string) {
     id: row.id,
     title: row.title,
     mode: row.mode,
+    category: projectCategory(row.mode, row.reference_panorama_image_url),
     captureTime: row.capture_time,
     location: row.location,
     publicationStatus: row.publication_status,
@@ -195,6 +205,7 @@ async function listProjects(env: PublicApiEnv, url: URL, origin: string) {
     ? Math.min(LIST_MAX_LIMIT, Math.floor(rawLimit))
     : LIST_DEFAULT_LIMIT;
   const mode = url.searchParams.get("mode") ?? "";
+  const category = url.searchParams.get("category") ?? "";
   const where: string[] = ["projects.publication_status = 'published'"];
   const params: unknown[] = [];
   if (mode) {
@@ -203,6 +214,19 @@ async function listProjects(env: PublicApiEnv, url: URL, origin: string) {
     }
     where.push("projects.mode = ?");
     params.push(mode);
+  }
+  if (category) {
+    if (!PROJECT_CATEGORIES.includes(category as ProjectCategory)) {
+      return json({ error: "category 参数无效。" }, { status: 400 });
+    }
+    if (category === "presentPanorama") {
+      where.push("projects.reference_panorama_image_url <> ''");
+    } else {
+      where.push("projects.reference_panorama_image_url = ''");
+      where.push(category === "panorama"
+        ? "projects.mode IN ('sphere360', 'partialSphere')"
+        : "projects.mode IN ('curvedPhoto', 'flatPhoto')");
+    }
   }
   const clause = `WHERE ${where.join(" AND ")}`;
   const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM projects ${clause}`)
@@ -251,7 +275,7 @@ async function projectDetail(env: PublicApiEnv, id: string, origin: string) {
         }>()
     : null;
   const provenance = await env.DB.prepare(
-    `SELECT provider, model, status, started_at, finished_at
+    `SELECT provider, model, generation_mode, status, started_at, finished_at
      FROM image_gen_tasks
      WHERE project_id = ? AND status = 'succeeded'
      ORDER BY created_at DESC LIMIT 1`,
@@ -260,6 +284,7 @@ async function projectDetail(env: PublicApiEnv, id: string, origin: string) {
     .first<{
       provider: string;
       model: string;
+      generation_mode: string;
       status: string;
       started_at: string | null;
       finished_at: string | null;
@@ -275,6 +300,7 @@ async function projectDetail(env: PublicApiEnv, id: string, origin: string) {
       id: row.id,
       title: row.title,
       mode: row.mode,
+      category: projectCategory(row.mode, row.reference_panorama_image_url),
       workflowStep: row.workflow_step,
       publicationStatus: row.publication_status,
       createdAt: row.created_at,
@@ -291,6 +317,8 @@ async function projectDetail(env: PublicApiEnv, id: string, origin: string) {
         originalThumbnailUrl: absoluteUrl(origin, row.original_thumbnail_url),
         panoramaImageUrl: absoluteUrl(origin, row.panorama_image_url),
         panoramaThumbnailUrl: absoluteUrl(origin, row.panorama_thumbnail_url),
+        referencePanoramaImageUrl: absoluteUrl(origin, row.reference_panorama_image_url),
+        referencePanoramaThumbnailUrl: absoluteUrl(origin, row.reference_panorama_thumbnail_url),
       },
       render: {
         projection: scene.projection ?? null,
@@ -311,6 +339,7 @@ async function projectDetail(env: PublicApiEnv, id: string, origin: string) {
         ? {
             provider: provenance.provider,
             model: provenance.model,
+            generationMode: provenance.generation_mode,
             status: provenance.status,
             startedAt: provenance.started_at,
             finishedAt: provenance.finished_at,

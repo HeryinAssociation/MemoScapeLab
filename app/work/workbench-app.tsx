@@ -17,10 +17,11 @@ import {
 import { authenticatedFetch } from "@/src/auth/client";
 import { createWebpThumbnail } from "@/src/images/client-thumbnail";
 import type { ImageGenProviderName } from "@/worker/image-gen/types";
+import type { ImageGenerationMode } from "@/worker/image-gen/modes";
 
 type LoadState = "loading" | "ready" | "error";
 type GenStatus = "idle" | "running" | "succeeded" | "failed";
-type UploadKind = "original" | "panorama";
+type UploadKind = "original" | "reference_panorama" | "panorama";
 type StoredAssetKind = UploadKind | "thumbnail";
 
 interface UploadedAsset {
@@ -37,6 +38,7 @@ const WORKFLOW_STEPS = [
 
 const UPLOAD_LIMITS: Record<UploadKind, number> = {
   original: 10 * 1024 * 1024,
+  reference_panorama: 50 * 1024 * 1024,
   panorama: 50 * 1024 * 1024,
 };
 
@@ -59,6 +61,9 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
   const [genStatus, setGenStatus] = useState<GenStatus>("idle");
   const [genError, setGenError] = useState("");
   const [genProvider, setGenProvider] = useState<ImageGenProviderName | "">("");
+  const [generationMode, setGenerationMode] = useState<ImageGenerationMode>(
+    "historical_with_present_panorama",
+  );
   const pollTimerRef = useRef<number | null>(null);
   const [uploading, setUploading] = useState<UploadKind | null>(null);
   const [publishing, setPublishing] = useState(false);
@@ -103,6 +108,8 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     title?: string;
     originalImageUrl?: string;
     originalThumbnailUrl?: string;
+    referencePanoramaImageUrl?: string;
+    referencePanoramaThumbnailUrl?: string;
     panoramaImageUrl?: string;
     panoramaThumbnailUrl?: string;
     scene?: ImmersiveScene;
@@ -118,6 +125,10 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
       mode: scene.mode,
       originalImageUrl: options.originalImageUrl ?? project?.originalImageUrl ?? "",
       originalThumbnailUrl: options.originalThumbnailUrl ?? project?.originalThumbnailUrl ?? "",
+      referencePanoramaImageUrl:
+        options.referencePanoramaImageUrl ?? project?.referencePanoramaImageUrl ?? "",
+      referencePanoramaThumbnailUrl:
+        options.referencePanoramaThumbnailUrl ?? project?.referencePanoramaThumbnailUrl ?? "",
       panoramaImageUrl: options.panoramaImageUrl ?? project?.panoramaImageUrl ?? "",
       panoramaThumbnailUrl: options.panoramaThumbnailUrl ?? project?.panoramaThumbnailUrl ?? "",
       scene,
@@ -150,7 +161,11 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
       throw new Error("仅支持 JPG/JPEG、PNG 和 WebP 图片。");
     }
     if (kind !== "thumbnail" && file.size > UPLOAD_LIMITS[kind]) {
-      const label = kind === "original" ? "历史原图" : "宽幅 / 全景照片";
+      const label = kind === "original"
+        ? "历史原图"
+        : kind === "reference_panorama"
+          ? "现实参考全景"
+          : "宽幅 / 全景照片";
       throw new Error(`${label}不能超过 ${UPLOAD_LIMITS[kind] / 1024 / 1024} MB。`);
     }
     if (kind === "thumbnail" && (file.type !== "image/webp" || file.size > 5 * 1024 * 1024)) {
@@ -204,7 +219,12 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
   };
 
   const uploadImagePair = async (file: File, kind: UploadKind) => {
-    setMessage(`正在生成 ${kind === "original" ? "历史原图" : "全景图"} WebP 缩略图`);
+    const label = kind === "original"
+      ? "历史原图"
+      : kind === "reference_panorama"
+        ? "现实参考全景"
+        : "全景图";
+    setMessage(`正在生成 ${label} WebP 缩略图`);
     const thumbnail = await createWebpThumbnail(file, file.name, {
       maxWidth: 1600,
       maxHeight: 900,
@@ -221,7 +241,11 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     if (!file) return;
     setUploading(kind);
     try {
-      const label = kind === "original" ? "历史原图" : "宽幅 / 全景照片";
+      const label = kind === "original"
+        ? "历史原图"
+        : kind === "reference_panorama"
+          ? "现实参考全景"
+          : "宽幅 / 全景照片";
       setMessage(`正在上传${label}：${file.name}`);
       const pair = await uploadImagePair(file, kind);
       const url = pair.source.url;
@@ -229,13 +253,16 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
       const nextTitle = title || file.name.replace(/\.[^.]+$/, "");
       if (!title) setTitle(nextTitle);
       const currentScene = project?.scene ?? INITIAL_SCENE;
-      const scene = kind === "panorama" || !project
+      const scene = kind === "panorama" || (kind === "original" && !project)
         ? { ...currentScene, title: nextTitle, source: url, thumbnail: thumbnailUrl }
         : currentScene;
       await saveProject({
         title: nextTitle,
         originalImageUrl: kind === "original" ? url : undefined,
         originalThumbnailUrl: kind === "original" ? thumbnailUrl : undefined,
+        referencePanoramaImageUrl: kind === "reference_panorama" ? url : undefined,
+        referencePanoramaThumbnailUrl:
+          kind === "reference_panorama" ? thumbnailUrl : undefined,
         panoramaImageUrl: kind === "panorama" ? url : undefined,
         panoramaThumbnailUrl: kind === "panorama" ? thumbnailUrl : undefined,
         scene,
@@ -277,7 +304,12 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
     setGenStatus("running");
     setGenError("");
     try {
-      const body: Record<string, unknown> = { projectId: project.id };
+      const body: Record<string, unknown> = {
+        projectId: project.id,
+        mode: generationMode,
+        size: "2048x1024",
+        quality: "medium",
+      };
       if (genProvider) body.provider = genProvider;
       const response = await authenticatedFetch("/api/generate", {
         method: "POST",
@@ -389,6 +421,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
   const cover = project?.panoramaThumbnailUrl || project?.originalThumbnailUrl || project?.panoramaImageUrl || project?.originalImageUrl;
   const isTakenDown = project?.moderationStatus === "taken_down";
   const canEdit = project?.canEdit !== false;
+  const usesPresentPanorama = generationMode === "historical_with_present_panorama";
 
   return (
     <main className="workbench-page">
@@ -452,7 +485,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
             <div className="step-intro">
               <span>STEP 01 / 影像来源</span>
               <h1>上传照片</h1>
-              <p>上传历史原图或宽幅照片；浏览器会在上传前同步生成 WebP 缩略图。保存后即可进入全景生成。</p>
+              <p>上传历史原图与现实参考全景；现实全景负责约束空间和地理结构，历史照片负责约束年代风貌。</p>
             </div>
             <div className="source-layout">
               <div className="source-uploads">
@@ -482,6 +515,32 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                   <em>原文件 + WEBP 缩略图 · 最大 10 MB</em>
                 </label>
                 <span className="upload-flow-arrow">→</span>
+                <label className={`source-upload-card ${project?.referencePanoramaImageUrl ? "has-image" : ""}`}>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    style={{ display: "none" }}
+                    disabled={uploading !== null}
+                    onChange={(event) => void uploadSource("reference_panorama", event)}
+                  />
+                  {project?.referencePanoramaImageUrl && (
+                    <span
+                      className="source-upload-preview"
+                      style={{ backgroundImage: `url("${project.referencePanoramaThumbnailUrl || project.referencePanoramaImageUrl}")` }}
+                    />
+                  )}
+                  <span className="source-upload-icon">{uploading === "reference_panorama" ? "···" : "◎"}</span>
+                  <strong>
+                    {uploading === "reference_panorama"
+                      ? "正在上传 LightCOS"
+                      : project?.referencePanoramaImageUrl
+                        ? "更换现实参考全景"
+                        : "上传现实参考全景"}
+                  </strong>
+                  <small>同一地点的当代 2:1 街景全景，用于约束道路、桥梁与建筑轮廓</small>
+                  <em>原文件 + WEBP 缩略图 · 最大 50 MB</em>
+                </label>
+                <span className="upload-flow-arrow">→</span>
                 <label className={`source-upload-card ${project?.panoramaImageUrl ? "has-image" : ""}`}>
                   <input
                     type="file"
@@ -501,7 +560,7 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                         ? "更换宽幅 / 全景照片"
                         : "上传宽幅 / 全景照片"}
                   </strong>
-                  <small>已有的 AIGC 全景或其他宽幅照片（可选）</small>
+                  <small>已有的 AIGC 历史全景或其他宽幅成品（可选）</small>
                   <em>原文件 + WEBP 缩略图 · 最大 50 MB</em>
                 </label>
               </div>
@@ -557,22 +616,58 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
 
         {loadState === "ready" && step === 2 && (
           <div className="reserved-step">
-            <div className="reserved-visual">
-              <span
+            <div className={`reserved-visual ${usesPresentPanorama ? "three-up" : ""}`}>
+              <div
                 className="reserved-image"
                 style={project?.originalImageUrl ? { backgroundImage: `url("${project.originalThumbnailUrl || project.originalImageUrl}")` } : undefined}
               />
+              {usesPresentPanorama && <span>＋</span>}
+              {usesPresentPanorama && (
+                <div
+                  className="reserved-image panorama reference"
+                  style={project?.referencePanoramaImageUrl ? { backgroundImage: `url("${project.referencePanoramaThumbnailUrl || project.referencePanoramaImageUrl}")` } : undefined}
+                />
+              )}
               <span>→</span>
-              <span
+              <div
                 className="reserved-image panorama"
                 style={project?.panoramaImageUrl ? { backgroundImage: `url("${project.panoramaThumbnailUrl || project.panoramaImageUrl}")` } : undefined}
               />
             </div>
             <h1>生成全景</h1>
             <p>
-              以已上传的历史原图为参考，调用大模型图生图接口扩出可 360 度浏览的全景图。
-              生成任务在服务端执行，完成后结果自动存入项目库。
+              {usesPresentPanorama
+                ? "以现实全景锁定相机位置、道路、桥梁和建筑轮廓，以历史照片还原目标年代风貌，生成空间连续的 2:1 全景图。"
+                : "仅以历史照片为参考，向四周推演并扩展为可沉浸浏览的 2:1 全景图。"}
             </p>
+            <div className="generation-mode-grid" role="radiogroup" aria-label="全景生成模式">
+              <label className={usesPresentPanorama ? "selected" : ""}>
+                <input
+                  type="radio"
+                  name="generation-mode"
+                  value="historical_with_present_panorama"
+                  checked={usesPresentPanorama}
+                  onChange={() => setGenerationMode("historical_with_present_panorama")}
+                />
+                <span>
+                  <strong>历史照片＋现实全景约束生成（推荐）</strong>
+                  <small>空间与地理结构更稳定</small>
+                </span>
+              </label>
+              <label className={!usesPresentPanorama ? "selected" : ""}>
+                <input
+                  type="radio"
+                  name="generation-mode"
+                  value="historical_only"
+                  checked={!usesPresentPanorama}
+                  onChange={() => setGenerationMode("historical_only")}
+                />
+                <span>
+                  <strong>仅历史照片扩展</strong>
+                  <small>缺少现实全景时使用</small>
+                </span>
+              </label>
+            </div>
             <label style={{ display: "flex", alignItems: "center", gap: 12, margin: "16px 0", fontSize: 11 }}>
               <span>图片生成厂商：</span>
               <select
@@ -590,7 +685,11 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
               <button
                 className="admin-primary-button"
                 type="button"
-                disabled={!project?.originalImageUrl || genStatus === "running"}
+                disabled={
+                  !project?.originalImageUrl ||
+                  (usesPresentPanorama && !project?.referencePanoramaImageUrl) ||
+                  genStatus === "running"
+                }
                 onClick={startGenerate}
               >
                 {genStatus === "running" ? "生成中…" : project?.panoramaImageUrl ? "重新生成全景" : "开始生成全景"}
@@ -710,6 +809,9 @@ export function WorkbenchApp({ projectId }: { projectId?: string }) {
                 </div>
               </div>
             </div>
+            {usesPresentPanorama && !project?.referencePanoramaImageUrl && (
+              <p className="generation-mode-warning">请先回到步骤 1 上传现实参考全景。</p>
+            )}
           </div>
         )}
       </section>

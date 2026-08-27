@@ -1,6 +1,6 @@
 const encoder = new TextEncoder();
 
-export type LightCosAssetKind = "original" | "panorama" | "thumbnail" | "avatar";
+export type LightCosAssetKind = "original" | "reference_panorama" | "panorama" | "thumbnail" | "avatar";
 
 export interface LightCosBindings {
   TENCENT_LIGHTCOS_ACCOUNT_ID?: string;
@@ -43,6 +43,7 @@ export const LIGHTCOS_ALLOWED_TYPES = [
 
 export const LIGHTCOS_SIZE_LIMITS: Record<LightCosAssetKind, number> = {
   original: 10 * 1024 * 1024,
+  reference_panorama: 50 * 1024 * 1024,
   panorama: 50 * 1024 * 1024,
   thumbnail: 5 * 1024 * 1024,
   avatar: 5 * 1024 * 1024,
@@ -124,11 +125,13 @@ export function validateLightCosUpload(kind: LightCosAssetKind, contentType: str
   if (size > limit) {
     const label = kind === "original"
       ? "历史原图"
-      : kind === "panorama"
-        ? "全景图"
-        : kind === "thumbnail"
-          ? "缩略图"
-          : "头像";
+      : kind === "reference_panorama"
+        ? "现实参考全景"
+        : kind === "panorama"
+          ? "全景图"
+          : kind === "thumbnail"
+            ? "缩略图"
+            : "头像";
     throw new Error(`${label}不能超过 ${Math.round(limit / 1024 / 1024)} MB。`);
   }
   return {
